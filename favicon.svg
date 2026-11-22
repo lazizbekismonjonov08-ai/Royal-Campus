@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <defs>
+    <linearGradient id="gold" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#F1D79E"/>
+      <stop offset="50%" stop-color="#C6A15B"/>
+      <stop offset="100%" stop-color="#9A752F"/>
+    </linearGradient>
+  </defs>
+  <rect width="64" height="64" rx="14" fill="#101C32"/>
+  <rect x="2.5" y="2.5" width="59" height="59" rx="12" fill="none" stroke="url(#gold)" stroke-width="1.5" stroke-opacity="0.7"/>
+  <!-- Crown peaks -->
+  <path d="M18 35L14 22L24 27L32 16L40 27L50 22L46 35H18Z" fill="url(#gold)"/>
+  <!-- Pearls -->
+  <circle cx="14" cy="21.5" r="2" fill="#F1D79E"/>
+  <circle cx="32" cy="15" r="2.5" fill="#FFFFFF"/>
+  <circle cx="50" cy="21.5" r="2" fill="#F1D79E"/>
+  <!-- Crown headband -->
+  <rect x="18" y="37" width="28" height="4" rx="1.5" fill="url(#gold)"/>
+  <circle cx="24" cy="39" r="1" fill="#101C32"/>
+  <circle cx="32" cy="39" r="1.2" fill="#101C32"/>
+  <circle cx="40" cy="39" r="1" fill="#101C32"/>
+  <!-- RC text -->
+  <text x="32" y="52" font-family="system-ui, sans-serif" font-size="9.5" font-weight="900" fill="url(#gold)" text-anchor="middle" letter-spacing="1.5">RC</text>
+</svg>

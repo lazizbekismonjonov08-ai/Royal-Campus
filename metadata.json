@@ -1,0 +1,8 @@
+{
+  "name": "Remix ROYAL CAMPUS",
+  "description": "ROYAL CAMPUS — Student Residence Management System (Web CRM + Telegram Bot platformasi)",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
