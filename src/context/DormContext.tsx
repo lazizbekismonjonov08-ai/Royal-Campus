@@ -201,7 +201,7 @@ interface DormContextType {
     passwordHash: string;
     passwordSalt: string;
     targetRole?: Role;
-  }) => { success: boolean; role: Role };
+  }) => { success: boolean; role: Role; studentId?: string };
 }
 
 const STORAGE_KEY = 'SMART_DORM_V1_STATE';
@@ -2028,7 +2028,7 @@ export const DormProvider: React.FC<{ children: React.ReactNode }> = ({ children
         const accId = acc.identifier.trim().toLowerCase();
         const accPhoneKey = normalizePhoneKey(acc.phone);
         if (accId === trimmed) return true;
-        if (phoneKey.length >= 9 && (accPhoneKey === phoneKey || accId === phoneKey)) return true;
+        if (phoneKey.length >= 7 && (accPhoneKey === phoneKey || accId === phoneKey)) return true;
         return false;
       });
     },
@@ -2128,7 +2128,7 @@ export const DormProvider: React.FC<{ children: React.ReactNode }> = ({ children
     passwordHash: string;
     passwordSalt: string;
     targetRole?: Role;
-  }): { success: boolean; role: Role } => {
+  }): { success: boolean; role: Role; studentId?: string } => {
     const trimmed = params.identifier.trim();
     const lowered = trimmed.toLowerCase();
     const phoneKey = normalizePhoneKey(trimmed);
@@ -2139,21 +2139,25 @@ export const DormProvider: React.FC<{ children: React.ReactNode }> = ({ children
     const matchedStudent = students.find(
       (s: Student) =>
         s.status !== 'deleted_pending_purge' &&
-        ((phoneKey.length >= 9 && normalizePhoneKey(s.phone) === phoneKey) ||
+        ((phoneKey.length >= 7 && normalizePhoneKey(s.phone) === phoneKey) ||
           s.passportNumber.trim().toLowerCase() === lowered)
     );
     const matchedEmployee = employees.find(
       (e: Employee) =>
-        (phoneKey.length >= 9 && normalizePhoneKey(e.phone) === phoneKey) ||
+        (phoneKey.length >= 7 && normalizePhoneKey(e.phone) === phoneKey) ||
         e.email.trim().toLowerCase() === lowered
     );
 
     const resolvedRole: Role =
-      existingAccount?.role ||
-      (matchedEmployee ? matchedEmployee.role : undefined) ||
-      (matchedStudent ? 'student' : undefined) ||
-      params.targetRole ||
-      'student';
+      params.targetRole === 'student'
+        ? 'student'
+        : existingAccount?.role ||
+          (matchedEmployee ? matchedEmployee.role : undefined) ||
+          (matchedStudent ? 'student' : undefined) ||
+          params.targetRole ||
+          'student';
+
+    const resolvedStudentId = existingAccount?.studentId || matchedStudent?.id;
 
     setState((prev: typeof state) => {
       const existingAccounts: StoredUserAccount[] = Array.isArray(prev.userAccounts)
@@ -2163,10 +2167,10 @@ export const DormProvider: React.FC<{ children: React.ReactNode }> = ({ children
       const accountId = existingAccount?.id || `acct-${Date.now()}`;
       const updatedAccount: StoredUserAccount = {
         id: accountId,
-        identifier: existingAccount?.identifier || (phoneKey.length >= 9 ? phoneKey : lowered),
+        identifier: existingAccount?.identifier || (phoneKey.length >= 7 ? phoneKey : lowered),
         phone: existingAccount?.phone || formattedPhone,
         role: resolvedRole,
-        studentId: existingAccount?.studentId || matchedStudent?.id,
+        studentId: resolvedStudentId,
         passwordHash: params.passwordHash,
         passwordSalt: params.passwordSalt,
         updatedAt: nowIso,
@@ -2182,8 +2186,15 @@ export const DormProvider: React.FC<{ children: React.ReactNode }> = ({ children
       };
     });
 
+    if (resolvedRole === 'student' && resolvedStudentId) {
+      setActiveStudentId(resolvedStudentId);
+    }
+    if (resolvedRole === 'student') {
+      setRole('student');
+    }
+
     addAudit('Parol tiklandi', 'Auth', trimmed, undefined, resolvedRole);
-    return { success: true, role: resolvedRole };
+    return { success: true, role: resolvedRole, studentId: resolvedStudentId };
   };
 
   const contextValue = useMemo(

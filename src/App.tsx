@@ -113,10 +113,16 @@ const MainAppContent: React.FC = () => {
     return (
       <S01_Login
         portalMode="student"
-        onLoginSuccess={() => {
-          setIsStaffSession(false);
-          setRole('student');
-          setActiveView('S05_StudentDashboard');
+        onLoginSuccess={(selRole) => {
+          if (selRole !== 'student') {
+            setIsStaffSession(true);
+            setRole(selRole);
+            setActiveView('S10_Dashboard');
+          } else {
+            setIsStaffSession(false);
+            setRole('student');
+            setActiveView('S05_StudentDashboard');
+          }
         }}
         onGoToPublicApp={() => {
           setApplicationPrefillRoomType(undefined);

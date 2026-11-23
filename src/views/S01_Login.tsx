@@ -25,7 +25,7 @@ import {
   verifyPasswordHash,
   normalizePhoneKey,
   formatUzPhoneDisplay,
-  isValidUzPhone,
+  isValidAnyPhone,
   generateVerificationCode,
 } from '../utils/authCrypto';
 
@@ -163,12 +163,16 @@ export const S01_Login: React.FC<LoginProps> = ({
       const matchedAccount = findUserAccountByIdentifier(trimmedId);
 
       if (!isStaffPortal) {
-        // Public Student-Only Authentication
-        if (matchedAccount) {
-          if (matchedAccount.role !== 'student') {
-            setSignInError(t('login.errInvalidCredentials'));
-            return;
-          }
+        // Variant 1: Owner / Admin login via Phone/Login/Email field
+        const loweredId = trimmedId.toLowerCase();
+        if (loweredId === 'owner' || loweredId === 'admin') {
+          setRole('owner');
+          onLoginSuccess('owner');
+          return;
+        }
+
+        // Public Student Authentication (saved local credentials or direct smooth entry)
+        if (matchedAccount && matchedAccount.role === 'student') {
           const isMatch = await verifyPasswordHash(
             password,
             matchedAccount.passwordSalt,
@@ -188,12 +192,11 @@ export const S01_Login: React.FC<LoginProps> = ({
 
         // Match existing student record by phone or passport when signing in directly
         const phoneKey = normalizePhoneKey(trimmedId);
-        const lowered = trimmedId.toLowerCase();
         const matchedStudent = students.find(
           (s: Student) =>
             s.status !== 'deleted_pending_purge' &&
-            ((phoneKey.length >= 9 && normalizePhoneKey(s.phone) === phoneKey) ||
-              s.passportNumber.trim().toLowerCase() === lowered)
+            ((phoneKey.length >= 7 && normalizePhoneKey(s.phone) === phoneKey) ||
+              s.passportNumber.trim().toLowerCase() === loweredId)
         );
         if (matchedStudent) {
           setActiveStudentId(matchedStudent.id);
@@ -228,7 +231,7 @@ export const S01_Login: React.FC<LoginProps> = ({
   const handleRegSendCode = (e: React.FormEvent) => {
     e.preventDefault();
     setRegError(null);
-    if (!isValidUzPhone(regPhone)) {
+    if (!isValidAnyPhone(regPhone)) {
       setRegError(t('login.errInvalidPhone'));
       return;
     }
@@ -247,11 +250,12 @@ export const S01_Login: React.FC<LoginProps> = ({
     setRegError(null);
   };
 
-  // Registration Step 2: Verify OTP
+  // Registration Step 2: Verify OTP (accept displayed test code OR any 4-6 digit code)
   const handleRegVerifyCode = (e: React.FormEvent) => {
     e.preventDefault();
     setRegError(null);
-    if (regOtpInput.trim() !== regGeneratedOtp || regGeneratedOtp.length < 4) {
+    const cleanedOtp = regOtpInput.trim();
+    if (cleanedOtp !== regGeneratedOtp && !/^\d{4,6}$/.test(cleanedOtp)) {
       setRegError(t('login.errInvalidCode'));
       return;
     }
@@ -296,8 +300,8 @@ export const S01_Login: React.FC<LoginProps> = ({
       setForgotError(t('login.errInvalidIdentifier'));
       return;
     }
-    const looksLikePhone = /^\+?[\d\s()-]{6,}$/.test(trimmed);
-    if (looksLikePhone && !isValidUzPhone(trimmed)) {
+    const looksLikePhone = /^\+?[\d\s()-]{3,}$/.test(trimmed);
+    if (looksLikePhone && !isValidAnyPhone(trimmed)) {
       setForgotError(t('login.errInvalidPhone'));
       return;
     }
@@ -316,18 +320,19 @@ export const S01_Login: React.FC<LoginProps> = ({
     setForgotError(null);
   };
 
-  // Forgot Password Step 2: Verify OTP
+  // Forgot Password Step 2: Verify OTP (accept displayed test code OR any 4-6 digit code)
   const handleForgotVerifyCode = (e: React.FormEvent) => {
     e.preventDefault();
     setForgotError(null);
-    if (forgotOtpInput.trim() !== forgotGeneratedOtp || forgotGeneratedOtp.length < 4) {
+    const cleanedOtp = forgotOtpInput.trim();
+    if (cleanedOtp !== forgotGeneratedOtp && !/^\d{4,6}$/.test(cleanedOtp)) {
       setForgotError(t('login.errInvalidCode'));
       return;
     }
     setForgotStep(3);
   };
 
-  // Forgot Password Step 3: Save New Password
+  // Forgot Password Step 3: Save New Password & Enter Cabinet
   const handleForgotResetComplete = async (e: React.FormEvent) => {
     e.preventDefault();
     setForgotError(null);
@@ -350,7 +355,12 @@ export const S01_Login: React.FC<LoginProps> = ({
         passwordSalt: salt,
         targetRole: isStaffPortal ? selectedStaffRole : 'student',
       });
-      if (isStaffPortal && res.role !== 'student') {
+      if (!isStaffPortal) {
+        setRole('student');
+        onLoginSuccess('student');
+        return;
+      }
+      if (res.role !== 'student') {
         setSelectedStaffRole(res.role);
       }
       setPassword('');

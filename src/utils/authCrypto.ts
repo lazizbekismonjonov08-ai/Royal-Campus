@@ -144,6 +144,11 @@ export function isValidUzPhone(input: string): boolean {
   return (digits.length === 12 && digits.startsWith('998')) || digits.length === 9;
 }
 
+export function isValidAnyPhone(input: string): boolean {
+  const digits = input.replace(/\D/g, '');
+  return digits.length >= 7 && digits.length <= 15;
+}
+
 export function generateVerificationCode(): string {
   if (typeof crypto !== 'undefined' && typeof crypto.getRandomValues === 'function') {
     const arr = new Uint32Array(1);
