@@ -10,6 +10,7 @@ import {
   X,
   Check,
   Menu,
+  LogOut,
 } from 'lucide-react';
 import { BrandLogo } from './BrandLogo';
 import { LanguageSwitcher } from './LanguageSwitcher';
@@ -20,6 +21,8 @@ interface HeaderProps {
   setActiveView: (view: string) => void;
   isMobileMenuOpen?: boolean;
   onToggleMobileMenu?: () => void;
+  isStaffSession?: boolean;
+  onLogout?: () => void;
 }
 
 export const Header: React.FC<HeaderProps> = ({
@@ -28,6 +31,8 @@ export const Header: React.FC<HeaderProps> = ({
   onSearchSelect,
   isMobileMenuOpen = false,
   onToggleMobileMenu,
+  isStaffSession = false,
+  onLogout,
 }) => {
   const { role, setRole, currentUserName, notifications, markNotificationAsRead, students, rooms, issues, applications } = useDorm();
   const { t } = useI18n();
@@ -263,67 +268,74 @@ export const Header: React.FC<HeaderProps> = ({
         {/* Language Selector */}
         <LanguageSwitcher variant="header" />
 
-        {/* Dashboard / Role Selector */}
-        <div ref={roleMenuRef} className="relative inline-block text-left">
-          <button
-            type="button"
-            onClick={() => setShowRoleMenu((prev) => !prev)}
-            className="flex items-center gap-1 sm:gap-2 bg-white hover:bg-slate-50 text-slate-800 px-2 sm:px-3 py-1.5 rounded-lg text-xs font-semibold transition-all border border-slate-200 hover:border-slate-300 shadow-2xs cursor-pointer min-h-[36px]"
-          >
+        {/* Dashboard / Role Selector (Staff session only; students see static Student badge) */}
+        {isStaffSession ? (
+          <div ref={roleMenuRef} className="relative inline-block text-left">
+            <button
+              type="button"
+              onClick={() => setShowRoleMenu((prev) => !prev)}
+              className="flex items-center gap-1 sm:gap-2 bg-white hover:bg-slate-50 text-slate-800 px-2 sm:px-3 py-1.5 rounded-lg text-xs font-semibold transition-all border border-slate-200 hover:border-slate-300 shadow-2xs cursor-pointer min-h-[36px]"
+            >
+              <ShieldCheck className="w-4 h-4 text-[#C6A15B] shrink-0" />
+              <span className="font-semibold text-xs text-slate-900">
+                {t(currentRoleItem.labelKey)}
+              </span>
+              <ChevronDown
+                className={`w-3.5 h-3.5 text-slate-400 transition-transform duration-150 shrink-0 ${
+                  showRoleMenu ? 'rotate-180 text-slate-600' : ''
+                }`}
+              />
+            </button>
+            {showRoleMenu && (
+              <div className="absolute right-0 top-full mt-1.5 w-64 bg-white rounded-xl shadow-2xl border border-slate-200 p-1.5 z-50 text-xs">
+                <div className="px-2.5 py-1.5 font-bold text-slate-500 text-[10px] uppercase tracking-wider border-b border-slate-100 flex items-center justify-between">
+                  <span>{t('header.roleSelect')}</span>
+                  <span className="text-[10px] text-[#C6A15B] bg-[#101C32] px-1.5 py-0.5 rounded font-bold">
+                    {t(currentRoleItem.labelKey)}
+                  </span>
+                </div>
+                <div className="py-1 space-y-0.5">
+                  {rolesList.map((r) => {
+                    const isSelected = role === r.key;
+                    return (
+                      <button
+                        key={r.key}
+                        type="button"
+                        onClick={() => {
+                          setRole(r.key);
+                          if (r.key === 'student') setActiveView('S05_StudentDashboard');
+                          else if (r.key === 'security') setActiveView('S150_AccessControl');
+                          else if (r.key === 'cleaner') setActiveView('S40_Rooms');
+                          else if (r.key === 'receptionist') setActiveView('S20_Students');
+                          else setActiveView('S10_Dashboard');
+                          setShowRoleMenu(false);
+                        }}
+                        className={`w-full text-left px-2.5 py-2 rounded-lg flex items-center justify-between transition-colors cursor-pointer ${
+                          isSelected ? 'bg-[#101C32] text-white font-bold' : 'hover:bg-slate-50 text-slate-700'
+                        }`}
+                      >
+                        <div>
+                          <div className={`font-medium text-xs ${isSelected ? 'text-white' : 'text-slate-900'}`}>
+                            {t(r.labelKey)}
+                          </div>
+                          <div className={`text-[10px] font-normal ${isSelected ? 'text-slate-300' : 'text-slate-500'}`}>
+                            {t(r.descKey)}
+                          </div>
+                        </div>
+                        {isSelected && <Check className="w-4 h-4 text-[#C6A15B] shrink-0 ml-2" />}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+          </div>
+        ) : (
+          <div className="flex items-center gap-1.5 bg-[#F7F5F0] text-slate-800 px-2.5 py-1.5 rounded-lg text-xs font-semibold border border-[#C6A15B]/30 min-h-[36px]">
             <ShieldCheck className="w-4 h-4 text-[#C6A15B] shrink-0" />
-            <span className="font-semibold text-xs text-slate-900">
-              {t(currentRoleItem.labelKey)}
-            </span>
-            <ChevronDown
-              className={`w-3.5 h-3.5 text-slate-400 transition-transform duration-150 shrink-0 ${
-                showRoleMenu ? 'rotate-180 text-slate-600' : ''
-              }`}
-            />
-          </button>
-          {showRoleMenu && (
-            <div className="absolute right-0 top-full mt-1.5 w-64 bg-white rounded-xl shadow-2xl border border-slate-200 p-1.5 z-50 text-xs">
-              <div className="px-2.5 py-1.5 font-bold text-slate-500 text-[10px] uppercase tracking-wider border-b border-slate-100 flex items-center justify-between">
-                <span>{t('header.roleSelect')}</span>
-                <span className="font-mono text-[9px] text-[#C6A15B] bg-[#101C32] px-1.5 py-0.5 rounded uppercase font-bold tracking-wider">
-                  {t(currentRoleItem.labelKey)}
-                </span>
-              </div>
-              <div className="py-1 space-y-0.5">
-                {rolesList.map((r) => {
-                  const isSelected = role === r.key;
-                  return (
-                    <button
-                      key={r.key}
-                      type="button"
-                      onClick={() => {
-                        setRole(r.key);
-                        if (r.key === 'student') setActiveView('S05_StudentDashboard');
-                        else if (r.key === 'security') setActiveView('S150_AccessControl');
-                        else if (r.key === 'cleaner') setActiveView('S40_Rooms');
-                        else if (r.key === 'receptionist') setActiveView('S20_Students');
-                        else setActiveView('S10_Dashboard');
-                        setShowRoleMenu(false);
-                      }}
-                      className={`w-full text-left px-2.5 py-2 rounded-lg flex items-center justify-between transition-colors cursor-pointer ${
-                        isSelected ? 'bg-[#101C32] text-white font-bold' : 'hover:bg-slate-50 text-slate-700'
-                      }`}
-                    >
-                      <div>
-                        <div className={`font-medium text-xs ${isSelected ? 'text-white' : 'text-slate-900'}`}>
-                          {t(r.labelKey)}
-                        </div>
-                        <div className={`text-[10px] font-normal ${isSelected ? 'text-slate-300' : 'text-slate-500'}`}>
-                          {t(r.descKey)}
-                        </div>
-                      </div>
-                      {isSelected && <Check className="w-4 h-4 text-[#C6A15B] shrink-0 ml-2" />}
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-          )}
-        </div>
+            <span className="font-semibold text-xs text-slate-900">{t('role.student')}</span>
+          </div>
+        )}
 
         {/* Notifications Popover */}
         <div ref={notifsRef} className="relative">
@@ -369,6 +381,20 @@ export const Header: React.FC<HeaderProps> = ({
             </div>
           )}
         </div>
+
+        {/* Sign Out */}
+        {onLogout && (
+          <button
+            type="button"
+            onClick={onLogout}
+            title={t('common.logout')}
+            aria-label={t('common.logout')}
+            className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-slate-200 hover:border-rose-300 bg-white hover:bg-rose-50 text-slate-600 hover:text-rose-700 text-xs font-semibold transition-colors cursor-pointer min-h-[36px]"
+          >
+            <LogOut className="w-3.5 h-3.5 shrink-0" />
+            <span className="hidden sm:inline">{t('common.logout')}</span>
+          </button>
+        )}
       </div>
 
       {/* Mobile Fullscreen Search Overlay - faqat Talaba bo'lmagan foydalanuvchilarga ko'rinadi */}

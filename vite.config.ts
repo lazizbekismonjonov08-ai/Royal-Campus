@@ -40,6 +40,7 @@ function maintenanceAiDevPlugin() {
 
 export default defineConfig(() => {
   return {
+    base: './',
     plugins: [react(), tailwindcss(), maintenanceAiDevPlugin()],
     resolve: {
       alias: {

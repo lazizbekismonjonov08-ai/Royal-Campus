@@ -36,3 +36,77 @@ html, body {
   -ms-overflow-style: none;
   scrollbar-width: none;
 }
+
+@media print {
+  @page {
+    size: A4;
+    margin: 14mm;
+  }
+
+  body.printing-contract {
+    background: #ffffff !important;
+    color: #000000 !important;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+
+  body.printing-contract > *:not(.contract-print-root),
+  header,
+  nav,
+  aside,
+  .no-print {
+    display: none !important;
+  }
+
+  body.printing-contract .contract-print-root {
+    position: static !important;
+    inset: auto !important;
+    background: #ffffff !important;
+    padding: 0 !important;
+    margin: 0 !important;
+    width: 100% !important;
+    height: auto !important;
+    max-height: none !important;
+    overflow: visible !important;
+    display: block !important;
+  }
+
+  body.printing-contract .contract-print-modal-card {
+    position: static !important;
+    width: 100% !important;
+    max-width: 100% !important;
+    height: auto !important;
+    max-height: none !important;
+    overflow: visible !important;
+    border: none !important;
+    border-radius: 0 !important;
+    box-shadow: none !important;
+    background: #ffffff !important;
+    color: #000000 !important;
+  }
+
+  body.printing-contract .contract-print-scroll {
+    overflow: visible !important;
+    height: auto !important;
+    max-height: none !important;
+    padding: 0 !important;
+    background: #ffffff !important;
+    color: #000000 !important;
+  }
+
+  body.printing-contract .contract-print-hide {
+    display: none !important;
+  }
+
+  body.printing-contract .contract-page-break {
+    break-before: page;
+    page-break-before: always;
+  }
+
+  body.printing-contract tr,
+  body.printing-contract table {
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+}
+

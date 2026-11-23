@@ -1,5 +1,6 @@
 import React from 'react';
 import { useI18n } from '../i18n/I18nContext';
+import { resolveAssetPath } from '../utils/assetPath';
 
 export interface BrandEmblemProps {
   className?: string;
@@ -13,7 +14,7 @@ export const BrandEmblemImg: React.FC<BrandEmblemProps> = ({
   className = '',
 }) => (
   <img
-    src="/images/royal-logo.jpg"
+    src={resolveAssetPath('images/royal-logo.jpg')}
     alt="Royal Campus"
     className={`w-full h-full object-contain mix-blend-lighten brightness-110 contrast-105 pointer-events-none select-none ${className}`}
   />

@@ -7,14 +7,13 @@ export const S60_RevenueDashboard: React.FC = () => {
   const { stats, settings, students } = useDorm();
   const { t, formatCurrency } = useI18n();
 
-  // Room type revenue breakdown across all 6 categories
+  // Room type revenue breakdown across all 5 categories
   const revenueByType: Record<RoomType, number> = {
     standard: 0,
     standard_plus: 0,
     comfort: 0,
     comfort_plus: 0,
     lux: 0,
-    lux_plus: 0,
   };
 
   students.filter((s) => s.status === 'active').forEach((s) => {
@@ -66,7 +65,7 @@ export const S60_RevenueDashboard: React.FC = () => {
         </div>
       </div>
 
-      {/* Room Type Revenue Split (6 Categories) */}
+      {/* Room Type Revenue Split (5 Categories) */}
       <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-2xs">
         <h3 className="font-extrabold text-slate-900 text-sm mb-4">{t('revenue.byFloors')}</h3>
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 text-xs">

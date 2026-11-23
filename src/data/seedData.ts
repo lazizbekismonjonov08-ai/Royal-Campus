@@ -172,7 +172,6 @@ export const INITIAL_SETTINGS: DormSettings = {
     comfort: 1200000,       // 1.2M UZS (6-bed)
     comfort_plus: 1400000,  // 1.4M UZS (6-bed Panoramic)
     lux: 1400000,           // 1.4M UZS (4-bed)
-    lux_plus: 1600000,      // 1.6M UZS (4-bed Panoramic)
   },
   autoPaymentRemindersDays: [5, 2, 0],
   retentionMonths: 3,
@@ -385,13 +384,13 @@ export function generateInitialRooms(): Room[] {
         }
       }
 
-      // Upgrade select front-facing rooms across tiers and floors to _plus (panoramic) variants
+      // Upgrade select front-facing rooms across standard and comfort tiers to _plus (panoramic) variants
       const isFrontPanoramic =
         (floor === 2 && (r === 3 || r === 8 || r === 13)) ||
-        (floor === 3 && (r === 3 || r === 9 || r === 12)) ||
-        ((floor === 4 || floor === 5) && (r === 1 || r === 4 || r === 13));
+        (floor === 3 && (r === 3 || r === 9)) ||
+        ((floor === 4 || floor === 5) && (r === 4 || r === 13));
 
-      if (isFrontPanoramic) {
+      if (isFrontPanoramic && (type === 'standard' || type === 'comfort')) {
         type = `${type}_plus` as RoomType;
       }
       priceMonthly = INITIAL_SETTINGS.roomTariffs[type];

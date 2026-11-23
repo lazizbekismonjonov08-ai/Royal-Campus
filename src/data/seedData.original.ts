@@ -172,7 +172,6 @@ export const INITIAL_SETTINGS: DormSettings = {
     comfort: 1200000,
     comfort_plus: 1400000,
     lux: 1400000,
-    lux_plus: 1600000,
   },
   autoPaymentRemindersDays: [5, 2, 0],
   retentionMonths: 3,

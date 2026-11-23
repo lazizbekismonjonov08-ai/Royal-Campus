@@ -22,6 +22,7 @@ import {
   Receipt,
   FileCheck2,
   ShieldCheck,
+  LogOut,
 } from 'lucide-react';
 import { BrandLogo } from './BrandLogo';
 import { ModalCloseButton } from './ModalCloseButton';
@@ -33,6 +34,8 @@ interface SidebarProps {
   setActiveView: (view: string) => void;
   isMobileDrawerOpen?: boolean;
   onCloseMobileDrawer?: () => void;
+  isStaffSession?: boolean;
+  onLogout?: () => void;
 }
 
 export const Sidebar: React.FC<SidebarProps> = ({
@@ -40,6 +43,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
   setActiveView,
   isMobileDrawerOpen = false,
   onCloseMobileDrawer,
+  isStaffSession = false,
+  onLogout,
 }) => {
   const { role, setRole, currentUserName } = useDorm();
   const { t } = useI18n();
@@ -242,53 +247,48 @@ export const Sidebar: React.FC<SidebarProps> = ({
             <LanguageSwitcher variant="minimal" dropdownDirection="up" />
           </div>
 
-          {/* Mobile Drawer Role Switcher */}
-          <div className="py-2 border-t border-[#1A2D4F] space-y-1.5">
-            <div className="flex items-center justify-between">
-              <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider">{t('header.roleSelect')}:</span>
-              <span className="text-[10px] font-mono font-bold text-[#C6A15B] uppercase bg-[#0A1220] px-2 py-0.5 rounded border border-[#C6A15B]/30">
-                {role}
-              </span>
-            </div>
+          {/* Mobile Drawer Role Switcher (Staff session only) */}
+          {isStaffSession && (
+            <div className="py-2 border-t border-[#1A2D4F] space-y-1.5">
+              <div className="flex items-center justify-between">
+                <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider">{t('header.roleSelect')}:</span>
+                <span className="text-[10px] font-bold text-[#C6A15B] bg-[#0A1220] px-2 py-0.5 rounded border border-[#C6A15B]/30">
+                  {t(`role.${role}`)}
+                </span>
+              </div>
 
-            <div className="grid grid-cols-2 gap-1.5 pt-1">
-              {[
-                { key: 'owner' as Role, label: 'Owner' },
-                { key: 'manager' as Role, label: 'Manager' },
-                { key: 'receptionist' as Role, label: 'Reception' },
-                { key: 'security' as Role, label: 'Security' },
-                { key: 'cleaner' as Role, label: 'Cleaner' },
-                { key: 'student' as Role, label: 'Student' },
-              ].map((r) => (
-                <button
-                  key={r.key}
-                  type="button"
-                  onClick={() => {
-                    setRole(r.key);
-                    if (r.key === 'student') {
-                      setActiveView('S05_StudentDashboard');
-                    } else if (r.key === 'security') {
-                      setActiveView('S150_AccessControl');
-                    } else if (r.key === 'cleaner') {
-                      setActiveView('S40_Rooms');
-                    } else if (r.key === 'receptionist') {
-                      setActiveView('S20_Students');
-                    } else {
-                      setActiveView('S10_Dashboard');
-                    }
-                    if (onCloseMobileDrawer) onCloseMobileDrawer();
-                  }}
-                  className={`py-1.5 px-2 rounded-lg text-[11px] font-semibold text-center transition-colors cursor-pointer border ${
-                    role === r.key
-                      ? 'bg-[#C6A15B] text-[#101C32] font-bold border-[#C6A15B]'
-                      : 'bg-[#1A2D4F] text-slate-300 border-[#C6A15B]/20 hover:bg-[#223963]'
-                  }`}
-                >
-                  {r.label}
-                </button>
-              ))}
+              <div className="grid grid-cols-2 gap-1.5 pt-1">
+                {(['owner', 'manager', 'receptionist', 'security', 'cleaner', 'student'] as Role[]).map((rKey) => (
+                  <button
+                    key={rKey}
+                    type="button"
+                    onClick={() => {
+                      setRole(rKey);
+                      if (rKey === 'student') {
+                        setActiveView('S05_StudentDashboard');
+                      } else if (rKey === 'security') {
+                        setActiveView('S150_AccessControl');
+                      } else if (rKey === 'cleaner') {
+                        setActiveView('S40_Rooms');
+                      } else if (rKey === 'receptionist') {
+                        setActiveView('S20_Students');
+                      } else {
+                        setActiveView('S10_Dashboard');
+                      }
+                      if (onCloseMobileDrawer) onCloseMobileDrawer();
+                    }}
+                    className={`py-1.5 px-2 rounded-lg text-[11px] font-semibold text-center transition-colors cursor-pointer border leading-tight ${
+                      role === rKey
+                        ? 'bg-[#C6A15B] text-[#101C32] font-bold border-[#C6A15B]'
+                        : 'bg-[#1A2D4F] text-slate-300 border-[#C6A15B]/20 hover:bg-[#223963]'
+                    }`}
+                  >
+                    {t(`role.${rKey}`)}
+                  </button>
+                ))}
+              </div>
             </div>
-          </div>
+          )}
         </>
       )}
 
@@ -303,8 +303,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
           className="w-full bg-[#1A2D4F] hover:bg-[#223963] text-slate-200 hover:text-white p-2.5 rounded-xl border border-[#C6A15B]/30 flex items-center justify-between text-xs font-medium transition-colors group shadow-xs cursor-pointer"
         >
           <div className="text-left">
-            <div className="font-semibold text-[#C6A15B] text-[11px]">Bosh sahifa (Landing)</div>
-            <div className="text-[10px] text-slate-400">Tashrif buyuruvchilar uchun</div>
+            <div className="font-semibold text-[#C6A15B] text-[11px]">{t('login.homeLink')}</div>
+            <div className="text-[10px] text-slate-400">{t('login.homeDesc')}</div>
           </div>
           <ExternalLink className="w-3.5 h-3.5 text-[#C6A15B] group-hover:text-white shrink-0" />
         </button>
@@ -319,8 +319,22 @@ export const Sidebar: React.FC<SidebarProps> = ({
           className="w-full bg-[#1A2D4F]/50 hover:bg-[#1A2D4F] text-slate-300 hover:text-white p-2 rounded-xl border border-slate-700/60 flex items-center justify-between text-xs transition-colors group cursor-pointer"
         >
           <span className="text-[11px] font-medium">{t('app.title')}</span>
-          <span className="text-[10px] text-[#C6A15B]">Ariza →</span>
+          <span className="text-[10px] text-[#C6A15B]">→</span>
         </button>
+
+        {onLogout && (
+          <button
+            type="button"
+            onClick={() => {
+              if (isDrawer && onCloseMobileDrawer) onCloseMobileDrawer();
+              onLogout();
+            }}
+            className="w-full bg-[#0A1220]/70 hover:bg-rose-950/60 text-slate-300 hover:text-rose-200 p-2 rounded-xl border border-slate-700/60 hover:border-rose-500/40 flex items-center justify-between text-xs transition-colors cursor-pointer"
+          >
+            <span className="text-[11px] font-medium">{t('common.logout')}</span>
+            <LogOut className="w-3.5 h-3.5 text-slate-400" />
+          </button>
+        )}
       </div>
 
       {isDrawer && (
@@ -330,7 +344,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
           </div>
           <div className="min-w-0 flex-1">
             <div className="text-xs font-semibold text-slate-200 truncate">{currentUserName}</div>
-            <div className="text-[10px] text-[#C6A15B] uppercase tracking-wider font-mono font-bold">{role}</div>
+            <div className="text-[10px] text-[#C6A15B] font-semibold">{t(`role.${role}`)}</div>
           </div>
         </div>
       )}

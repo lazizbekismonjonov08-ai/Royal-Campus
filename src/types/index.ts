@@ -5,8 +5,7 @@ export type RoomType =
   | 'standard_plus'
   | 'comfort'
   | 'comfort_plus'
-  | 'lux'
-  | 'lux_plus';
+  | 'lux';
 
 export const ROOM_TYPE_ORDER: RoomType[] = [
   'standard',
@@ -14,7 +13,6 @@ export const ROOM_TYPE_ORDER: RoomType[] = [
   'comfort',
   'comfort_plus',
   'lux',
-  'lux_plus',
 ];
 
 export const ROOM_TYPE_CAPACITY: Record<RoomType, number> = {
@@ -23,7 +21,6 @@ export const ROOM_TYPE_CAPACITY: Record<RoomType, number> = {
   comfort: 6,
   comfort_plus: 6,
   lux: 4,
-  lux_plus: 4,
 };
 
 export type BedStatus = 'available' | 'occupied' | 'maintenance' | 'reserved';
@@ -232,7 +229,6 @@ export interface RoomTariff {
   comfort: number;       // e.g. 1,200,000 UZS (6-bed)
   comfort_plus: number;  // e.g. 1,400,000 UZS (6-bed Panoramic)
   lux: number;           // e.g. 1,400,000 UZS (4-bed)
-  lux_plus: number;      // e.g. 1,600,000 UZS (4-bed Panoramic)
 }
 
 export interface DormSettings {
@@ -399,4 +395,13 @@ export interface MaintenanceAiAnalysisResponse {
   source: 'gemini_api' | 'algorithmic_engine';
 }
 
-
+export interface StoredUserAccount {
+  id: string;
+  identifier: string;
+  phone: string;
+  role: Role;
+  studentId?: string;
+  passwordHash: string;
+  passwordSalt: string;
+  updatedAt: string;
+}

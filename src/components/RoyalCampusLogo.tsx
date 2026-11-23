@@ -1,5 +1,6 @@
 import React from 'react';
 import { BrandEmblemImg, BrandLogo } from './BrandLogo';
+import { resolveAssetPath } from '../utils/assetPath';
 
 interface RoyalCampusLogoProps {
   variant?: 'light' | 'dark';
@@ -35,7 +36,7 @@ export const RoyalCampusWallLogo: React.FC<{
     className={`relative rounded-3xl overflow-hidden border border-[#C6A15B]/30 shadow-2xl bg-[#070D19] p-6 text-center flex flex-col items-center justify-center ${className}`}
   >
     <img
-      src="/images/royal-logo.jpg"
+      src={resolveAssetPath('images/royal-logo.jpg')}
       alt="Royal Campus"
       className="w-48 h-48 object-contain mix-blend-lighten brightness-110 contrast-105"
     />

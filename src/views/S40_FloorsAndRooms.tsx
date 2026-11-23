@@ -657,8 +657,6 @@ export const S40_FloorsAndRooms: React.FC<FloorsProps> = ({ onSelectRoom }) => {
                               className={`text-[10px] font-bold uppercase px-2 py-0.5 rounded-md whitespace-nowrap ${
                                 room.status === 'maintenance' || room.isClosedForMaintenance
                                   ? 'bg-amber-100 text-amber-800'
-                                  : room.type === 'lux_plus'
-                                  ? 'bg-[#101C32] text-[#EAD096] border border-[#C6A15B]/60'
                                   : room.type === 'lux'
                                   ? 'bg-amber-100 text-amber-900'
                                   : room.type === 'comfort_plus'

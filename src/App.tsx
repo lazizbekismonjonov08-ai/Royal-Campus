@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { DormProvider, useDorm } from './context/DormContext';
 import { I18nProvider } from './i18n/I18nContext';
 import { Header } from './components/Header';
@@ -36,15 +36,52 @@ import { S130_Settings } from './views/S130_Settings';
 import { S140_AuditLog } from './views/S140_AuditLog';
 import { S150_AccessControl } from './views/S150_AccessControl';
 
+const isStaffHashActive = (): boolean =>
+  typeof window !== 'undefined' && window.location.hash.toLowerCase().startsWith('#staff');
+
+const clearStaffHash = () => {
+  if (typeof window !== 'undefined' && isStaffHashActive()) {
+    window.history.replaceState(null, '', window.location.pathname + window.location.search);
+  }
+};
+
 const MainAppContent: React.FC = () => {
-  const { role, students } = useDorm();
-  const [activeView, setActiveView] = useState<string>('S10_Dashboard');
+  const { role, setRole, students } = useDorm();
+  const [activeView, setActiveView] = useState<string>(() =>
+    isStaffHashActive() ? 'S01_StaffLogin' : 'S00_LandingPage'
+  );
+  const [isStaffSession, setIsStaffSession] = useState<boolean>(false);
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState<boolean>(false);
   const [applicationPrefillRoomType, setApplicationPrefillRoomType] = useState<RoomType | undefined>(undefined);
 
+  useEffect(() => {
+    const onHashChange = () => {
+      if (isStaffHashActive()) {
+        setIsStaffSession(false);
+        setActiveView('S01_StaffLogin');
+      }
+    };
+    window.addEventListener('hashchange', onHashChange);
+    return () => window.removeEventListener('hashchange', onHashChange);
+  }, []);
+
   const handleNavigate = (view: string) => {
+    if (view === 'S00_LandingPage') {
+      clearStaffHash();
+    }
     setActiveView(view);
     setIsMobileMenuOpen(false);
+  };
+
+  const handleLogout = () => {
+    setIsMobileMenuOpen(false);
+    if (isStaffSession) {
+      setIsStaffSession(false);
+      setActiveView('S01_StaffLogin');
+      return;
+    }
+    setRole('student');
+    setActiveView('S01_Login');
   };
 
   // Modals state
@@ -75,15 +112,45 @@ const MainAppContent: React.FC = () => {
   if (activeView === 'S01_Login') {
     return (
       <S01_Login
-        onLoginSuccess={(selRole) => {
-          if (selRole === 'student') setActiveView('S05_StudentDashboard');
-          else setActiveView('S10_Dashboard');
+        portalMode="student"
+        onLoginSuccess={() => {
+          setIsStaffSession(false);
+          setRole('student');
+          setActiveView('S05_StudentDashboard');
         }}
         onGoToPublicApp={() => {
           setApplicationPrefillRoomType(undefined);
           setActiveView('S03_OnlineApplication');
         }}
-        onGoToLanding={() => setActiveView('S00_LandingPage')}
+        onGoToLanding={() => {
+          clearStaffHash();
+          setActiveView('S00_LandingPage');
+        }}
+      />
+    );
+  }
+
+  if (activeView === 'S01_StaffLogin') {
+    return (
+      <S01_Login
+        portalMode="staff"
+        onLoginSuccess={(selRole) => {
+          setIsStaffSession(true);
+          if (selRole === 'student') setActiveView('S05_StudentDashboard');
+          else if (selRole === 'security') setActiveView('S150_AccessControl');
+          else if (selRole === 'cleaner') setActiveView('S40_Rooms');
+          else if (selRole === 'receptionist') setActiveView('S20_Students');
+          else setActiveView('S10_Dashboard');
+        }}
+        onGoToPublicApp={() => {
+          clearStaffHash();
+          setApplicationPrefillRoomType(undefined);
+          setActiveView('S03_OnlineApplication');
+        }}
+        onGoToLanding={() => {
+          clearStaffHash();
+          setActiveView('S00_LandingPage');
+        }}
       />
     );
   }
@@ -100,6 +167,24 @@ const MainAppContent: React.FC = () => {
 
   // Render view router
   const renderCurrentView = () => {
+    // Enforce student-only views for public student sessions
+    if (!isStaffSession || role === 'student') {
+      switch (activeView) {
+        case 'S05_StudentDashboard':
+          return <S05_StudentDashboard onNavigate={handleNavigate} />;
+        case 'S06_StudentProfile':
+          return <S06_StudentProfile />;
+        case 'S07_StudentRoom':
+          return <S07_StudentRoom />;
+        case 'S08_StudentPayments':
+          return <S08_StudentPayments />;
+        case 'S09_StudentContract':
+          return <S09_StudentContract />;
+        default:
+          return <S05_StudentDashboard onNavigate={handleNavigate} />;
+      }
+    }
+
     switch (activeView) {
       // Student Views
       case 'S05_StudentDashboard':
@@ -199,11 +284,7 @@ const MainAppContent: React.FC = () => {
         );
 
       default:
-        return role === 'student' ? (
-          <S05_StudentDashboard onNavigate={handleNavigate} />
-        ) : (
-          <S10_AdminDashboard onNavigate={handleNavigate} />
-        );
+        return <S10_AdminDashboard onNavigate={handleNavigate} />;
     }
   };
 
@@ -215,6 +296,8 @@ const MainAppContent: React.FC = () => {
         setActiveView={handleNavigate}
         isMobileMenuOpen={isMobileMenuOpen}
         onToggleMobileMenu={() => setIsMobileMenuOpen((prev) => !prev)}
+        isStaffSession={isStaffSession}
+        onLogout={handleLogout}
         onSearchSelect={(type, id) => {
           if (type === 'student') setSelectedStudentDetailId(id);
           else if (type === 'room') setSelectedRoomDetailId(id);
@@ -229,6 +312,8 @@ const MainAppContent: React.FC = () => {
           setActiveView={handleNavigate}
           isMobileDrawerOpen={isMobileMenuOpen}
           onCloseMobileDrawer={() => setIsMobileMenuOpen(false)}
+          isStaffSession={isStaffSession}
+          onLogout={handleLogout}
         />
 
         {/* Main Content Area */}

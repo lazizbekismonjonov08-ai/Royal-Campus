@@ -58,7 +58,6 @@ export const S42_RoomConfigModal: React.FC<RoomConfigModalProps> = ({
     comfort: 1200000,
     comfort_plus: 1400000,
     lux: 1400000,
-    lux_plus: 1600000,
   };
   const calculatedPriceMonthly = settings.roomTariffs?.[roomType] ?? fallbackTariffs[roomType];
 

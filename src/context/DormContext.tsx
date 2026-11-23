@@ -20,7 +20,9 @@ import {
   AccessTerminal,
   AccessLogEvent,
   AccessControlPolicy,
+  StoredUserAccount,
 } from '../types';
+import { formatUzPhoneDisplay, normalizePhoneKey } from '../utils/authCrypto';
 import {
   generateSeedData,
   INITIAL_SETTINGS,
@@ -184,6 +186,22 @@ interface DormContextType {
   updateAccessPolicy: (policyUpdates: Partial<AccessControlPolicy>) => void;
   clearAccessLogs: () => void;
   triggerTurnstileRelay: (terminalId: string, seconds?: number) => Promise<{ success: boolean; message: string }>;
+
+  // Auth Accounts & Recovery
+  userAccounts: StoredUserAccount[];
+  findUserAccountByIdentifier: (identifier: string) => StoredUserAccount | undefined;
+  registerStudentAccount: (params: {
+    fullName?: string;
+    phone: string;
+    passwordHash: string;
+    passwordSalt: string;
+  }) => Student;
+  resetUserPassword: (params: {
+    identifier: string;
+    passwordHash: string;
+    passwordSalt: string;
+    targetRole?: Role;
+  }) => { success: boolean; role: Role };
 }
 
 const STORAGE_KEY = 'SMART_DORM_V1_STATE';
@@ -303,21 +321,22 @@ export const DormProvider: React.FC<{ children: React.ReactNode }> = ({ children
         if (!parsed.accessPolicy) {
           parsed.accessPolicy = INITIAL_ACCESS_POLICY;
         }
-        // Migrate legacy 3-tier + isPanoramic/panoramicSurcharge state into 6 explicit RoomType categories
+        // Migrate legacy 3-tier / 6-tier state into the 5 explicit RoomType categories (removing lux_plus)
         if (!parsed.settings || !parsed.settings.roomTariffs) {
           parsed.settings = INITIAL_SETTINGS;
         } else {
-          const rt = parsed.settings.roomTariffs;
+          const rt = parsed.settings.roomTariffs as Record<string, number | undefined>;
           const isLegacyDefaults =
             rt.lux === 1200000 && rt.comfort === 800000 && rt.standard === 600000;
-          const needsSixTierMigration =
+          const hasLegacyLuxPlus = rt.lux_plus !== undefined;
+          const needsTierMigration =
             isLegacyDefaults ||
             rt.standard_plus === undefined ||
             rt.comfort_plus === undefined ||
-            rt.lux_plus === undefined ||
+            hasLegacyLuxPlus ||
             rt.panoramicSurcharge !== undefined;
 
-          if (needsSixTierMigration) {
+          if (needsTierMigration) {
             const legacySurcharge = typeof rt.panoramicSurcharge === 'number' ? rt.panoramicSurcharge : 200000;
             parsed.settings = {
               ...parsed.settings,
@@ -337,20 +356,18 @@ export const DormProvider: React.FC<{ children: React.ReactNode }> = ({ children
                         ? rt.comfort + legacySurcharge
                         : INITIAL_SETTINGS.roomTariffs.comfort_plus),
                     lux: rt.lux ?? INITIAL_SETTINGS.roomTariffs.lux,
-                    lux_plus:
-                      rt.lux_plus ??
-                      (typeof rt.lux === 'number'
-                        ? rt.lux + legacySurcharge
-                        : INITIAL_SETTINGS.roomTariffs.lux_plus),
                   },
             };
 
             const upgradeRoomType = (rawType: string | undefined, wasPanoramic?: boolean): RoomType => {
               const base = (rawType || 'comfort') as string;
-              if (base === 'standard_plus' || base === 'comfort_plus' || base === 'lux_plus') {
+              if (base === 'lux_plus') {
+                return 'lux';
+              }
+              if (base === 'standard_plus' || base === 'comfort_plus') {
                 return base;
               }
-              if (wasPanoramic && (base === 'standard' || base === 'comfort' || base === 'lux')) {
+              if (wasPanoramic && (base === 'standard' || base === 'comfort')) {
                 return `${base}_plus` as RoomType;
               }
               if (base === 'standard' || base === 'comfort' || base === 'lux') {
@@ -394,12 +411,13 @@ export const DormProvider: React.FC<{ children: React.ReactNode }> = ({ children
                     monthlyTariff: rm.priceMonthly,
                   };
                 }
+                const wasLuxPlus = (cleanStudent.roomType as string | undefined) === 'lux_plus';
                 const nextType = upgradeRoomType(cleanStudent.roomType, Boolean(s.isPanoramic));
                 return {
                   ...cleanStudent,
                   roomType: cleanStudent.roomType ? nextType : undefined,
                   monthlyTariff:
-                    s.isPanoramic || isLegacyDefaults
+                    s.isPanoramic || isLegacyDefaults || wasLuxPlus
                       ? (parsed.settings.roomTariffs[nextType] ?? INITIAL_SETTINGS.roomTariffs[nextType])
                       : cleanStudent.monthlyTariff,
                 };
@@ -419,6 +437,19 @@ export const DormProvider: React.FC<{ children: React.ReactNode }> = ({ children
                 }
               );
             }
+
+            if (Array.isArray(parsed.contracts)) {
+              parsed.contracts = parsed.contracts.map((c: Contract) => {
+                if ((c.roomType as string) === 'lux_plus') {
+                  return {
+                    ...c,
+                    roomType: 'lux',
+                    tariffMonthly: parsed.settings.roomTariffs.lux ?? INITIAL_SETTINGS.roomTariffs.lux,
+                  };
+                }
+                return c;
+              });
+            }
           }
         }
         // Ensure APP-1001 & APP-1002 exist for landing page status tracker demos
@@ -433,12 +464,16 @@ export const DormProvider: React.FC<{ children: React.ReactNode }> = ({ children
             parsed.applications = [...demoApps, ...parsed.applications];
           }
         }
+        // Ensure userAccounts array exists
+        if (!Array.isArray(parsed.userAccounts)) {
+          parsed.userAccounts = [];
+        }
         return parsed;
       }
     } catch (e) {
       console.error('Failed to parse localStorage', e);
     }
-    return generateSeedData();
+    return { ...generateSeedData(), userAccounts: [] as StoredUserAccount[] };
   });
 
   // Save changes to localStorage
@@ -466,6 +501,7 @@ export const DormProvider: React.FC<{ children: React.ReactNode }> = ({ children
     accessTerminals = INITIAL_ACCESS_TERMINALS,
     accessLogs = INITIAL_ACCESS_LOGS,
     accessPolicy = INITIAL_ACCESS_POLICY,
+    userAccounts = [] as StoredUserAccount[],
   } = state;
 
   // Determine current user name
@@ -1982,6 +2018,174 @@ export const DormProvider: React.FC<{ children: React.ReactNode }> = ({ children
     return accessClientService.triggerRelay(term, seconds);
   };
 
+  const findUserAccountByIdentifier = useCallback(
+    (identifier: string): StoredUserAccount | undefined => {
+      const trimmed = identifier.trim().toLowerCase();
+      if (!trimmed) return undefined;
+      const phoneKey = normalizePhoneKey(identifier);
+      const list: StoredUserAccount[] = Array.isArray(userAccounts) ? userAccounts : [];
+      return list.find((acc) => {
+        const accId = acc.identifier.trim().toLowerCase();
+        const accPhoneKey = normalizePhoneKey(acc.phone);
+        if (accId === trimmed) return true;
+        if (phoneKey.length >= 9 && (accPhoneKey === phoneKey || accId === phoneKey)) return true;
+        return false;
+      });
+    },
+    [userAccounts]
+  );
+
+  const registerStudentAccount = (params: {
+    fullName?: string;
+    phone: string;
+    passwordHash: string;
+    passwordSalt: string;
+  }): Student => {
+    const formattedPhone = formatUzPhoneDisplay(params.phone);
+    const phoneKey = normalizePhoneKey(params.phone);
+    const nowIso = new Date().toISOString();
+
+    const existingStudent = students.find(
+      (s: Student) =>
+        s.status !== 'deleted_pending_purge' &&
+        normalizePhoneKey(s.phone) === phoneKey
+    );
+
+    const targetStudent: Student = existingStudent
+      ? {
+          ...existingStudent,
+          fullName: params.fullName?.trim() ? params.fullName.trim() : existingStudent.fullName,
+          phone: formattedPhone,
+        }
+      : {
+          id: `std-${Date.now()}`,
+          fullName: params.fullName?.trim() || formattedPhone,
+          phone: formattedPhone,
+          birthDate: '',
+          passportNumber: '',
+          university: '',
+          faculty: '',
+          course: 1,
+          group: '',
+          parentPhone: '',
+          permanentAddress: '',
+          status: 'active',
+          monthlyTariff: settings.roomTariffs?.standard ?? INITIAL_SETTINGS.roomTariffs.standard,
+          paidUntil: new Date(Date.now() + 30 * 86400000).toISOString().slice(0, 10),
+          nextPaymentDueDate: new Date(Date.now() + 30 * 86400000).toISOString().slice(0, 10),
+          debtAmount: 0,
+          createdAt: nowIso.slice(0, 10),
+        };
+
+    setState((prev: typeof state) => {
+      const nextStudents = existingStudent
+        ? prev.students.map((s: Student) => (s.id === existingStudent.id ? targetStudent : s))
+        : [targetStudent, ...prev.students];
+
+      const existingAccounts: StoredUserAccount[] = Array.isArray(prev.userAccounts)
+        ? prev.userAccounts
+        : [];
+      const matchedAccountIndex = existingAccounts.findIndex(
+        (acc) =>
+          normalizePhoneKey(acc.phone) === phoneKey ||
+          acc.identifier.toLowerCase() === phoneKey
+      );
+
+      const newAccount: StoredUserAccount = {
+        id:
+          matchedAccountIndex >= 0
+            ? existingAccounts[matchedAccountIndex].id
+            : `acct-${Date.now()}`,
+        identifier: phoneKey || formattedPhone.toLowerCase(),
+        phone: formattedPhone,
+        role: 'student',
+        studentId: targetStudent.id,
+        passwordHash: params.passwordHash,
+        passwordSalt: params.passwordSalt,
+        updatedAt: nowIso,
+      };
+
+      const nextAccounts =
+        matchedAccountIndex >= 0
+          ? existingAccounts.map((acc, idx) => (idx === matchedAccountIndex ? newAccount : acc))
+          : [newAccount, ...existingAccounts];
+
+      return {
+        ...prev,
+        students: nextStudents,
+        userAccounts: nextAccounts,
+      };
+    });
+
+    setActiveStudentId(targetStudent.id);
+    setRole('student');
+    addAudit('Talaba ro‘yxatdan o‘tdi', 'Auth', targetStudent.id, undefined, formattedPhone);
+    return targetStudent;
+  };
+
+  const resetUserPassword = (params: {
+    identifier: string;
+    passwordHash: string;
+    passwordSalt: string;
+    targetRole?: Role;
+  }): { success: boolean; role: Role } => {
+    const trimmed = params.identifier.trim();
+    const lowered = trimmed.toLowerCase();
+    const phoneKey = normalizePhoneKey(trimmed);
+    const formattedPhone = phoneKey.length >= 9 ? formatUzPhoneDisplay(trimmed) : trimmed;
+    const nowIso = new Date().toISOString();
+
+    const existingAccount = findUserAccountByIdentifier(trimmed);
+    const matchedStudent = students.find(
+      (s: Student) =>
+        s.status !== 'deleted_pending_purge' &&
+        ((phoneKey.length >= 9 && normalizePhoneKey(s.phone) === phoneKey) ||
+          s.passportNumber.trim().toLowerCase() === lowered)
+    );
+    const matchedEmployee = employees.find(
+      (e: Employee) =>
+        (phoneKey.length >= 9 && normalizePhoneKey(e.phone) === phoneKey) ||
+        e.email.trim().toLowerCase() === lowered
+    );
+
+    const resolvedRole: Role =
+      existingAccount?.role ||
+      (matchedEmployee ? matchedEmployee.role : undefined) ||
+      (matchedStudent ? 'student' : undefined) ||
+      params.targetRole ||
+      'student';
+
+    setState((prev: typeof state) => {
+      const existingAccounts: StoredUserAccount[] = Array.isArray(prev.userAccounts)
+        ? prev.userAccounts
+        : [];
+
+      const accountId = existingAccount?.id || `acct-${Date.now()}`;
+      const updatedAccount: StoredUserAccount = {
+        id: accountId,
+        identifier: existingAccount?.identifier || (phoneKey.length >= 9 ? phoneKey : lowered),
+        phone: existingAccount?.phone || formattedPhone,
+        role: resolvedRole,
+        studentId: existingAccount?.studentId || matchedStudent?.id,
+        passwordHash: params.passwordHash,
+        passwordSalt: params.passwordSalt,
+        updatedAt: nowIso,
+      };
+
+      const nextAccounts = existingAccount
+        ? existingAccounts.map((acc) => (acc.id === existingAccount.id ? updatedAccount : acc))
+        : [updatedAccount, ...existingAccounts];
+
+      return {
+        ...prev,
+        userAccounts: nextAccounts,
+      };
+    });
+
+    addAudit('Parol tiklandi', 'Auth', trimmed, undefined, resolvedRole);
+    return { success: true, role: resolvedRole };
+  };
+
   const contextValue = useMemo(
     () => ({
       role,
@@ -2044,6 +2248,10 @@ export const DormProvider: React.FC<{ children: React.ReactNode }> = ({ children
       updateAccessPolicy,
       clearAccessLogs,
       triggerTurnstileRelay,
+      userAccounts,
+      findUserAccountByIdentifier,
+      registerStudentAccount,
+      resetUserPassword,
     }),
     [
       role,
@@ -2067,6 +2275,8 @@ export const DormProvider: React.FC<{ children: React.ReactNode }> = ({ children
       accessTerminals,
       accessLogs,
       accessPolicy,
+      userAccounts,
+      findUserAccountByIdentifier,
     ]
   );
 

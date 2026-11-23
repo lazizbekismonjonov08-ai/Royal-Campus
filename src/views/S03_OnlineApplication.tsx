@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useDorm } from '../context/DormContext';
 import { useI18n } from '../i18n/I18nContext';
-import { RoomType } from '../types';
+import { RoomType, ROOM_TYPE_ORDER, ROOM_TYPE_CAPACITY } from '../types';
 import { CheckCircle2, Upload, Send, ArrowLeft, X, FileText, AlertCircle, Sun, Moon } from 'lucide-react';
 import { BrandLogo } from '../components/BrandLogo';
 import { LanguageSwitcher } from '../components/LanguageSwitcher';
@@ -28,6 +28,7 @@ interface FormErrors {
   passportNumber?: string;
   fullName?: string;
   birthDate?: string;
+  preferredRoomType?: string;
   consent?: string;
 }
 
@@ -66,7 +67,7 @@ export const S03_OnlineApplication: React.FC<PublicAppProps> = ({
   onBackToLogin,
   initialRoomType,
 }) => {
-  const { submitApplication } = useDorm();
+  const { submitApplication, settings } = useDorm();
   const { t, language } = useI18n();
   const [submitted, setSubmitted] = useState(false);
   const [agreedToTerms, setAgreedToTerms] = useState(false);
@@ -94,13 +95,11 @@ export const S03_OnlineApplication: React.FC<PublicAppProps> = ({
     });
   };
 
-  // Preserve room type silently when passed from a landing page room CTA
-  const [preferredRoomType, setPreferredRoomType] = useState<RoomType>(initialRoomType || 'comfort');
+  // Preserve room type from landing CTA or let student pick among the 5 active tiers
+  const [preferredRoomType, setPreferredRoomType] = useState<RoomType | ''>(initialRoomType || '');
 
   useEffect(() => {
-    if (initialRoomType) {
-      setPreferredRoomType(initialRoomType);
-    }
+    setPreferredRoomType(initialRoomType || '');
   }, [initialRoomType]);
 
   // Form text inputs
@@ -156,7 +155,7 @@ export const S03_OnlineApplication: React.FC<PublicAppProps> = ({
       if (optValue === 'Malaka oshirish') return t('app.courseAdvanced');
     }
     if (typeof optValue === 'number') {
-      return `${optValue}${t('app.courseStageSuffix')}`;
+      return `${t('app.courseStagePrefix')}${optValue}${t('app.courseStageSuffix')}`;
     }
     return String(optValue);
   };
@@ -198,15 +197,23 @@ export const S03_OnlineApplication: React.FC<PublicAppProps> = ({
     }
 
     // Validate Passport Series and Number strictly (XX1234567)
-    const passportErr = getPassportValidationError(formData.passportNumber);
+    const passportErr = getPassportValidationError(formData.passportNumber, language);
     if (passportErr) {
       newErrors.passportNumber = passportErr;
     }
 
     // Validate Birth Date calendar rules (format DD.MM.YYYY, leap year, month limit)
-    const birthDateValidation = validateCalendarDate(formData.birthDate, { isTouched: true });
+    const birthDateValidation = validateCalendarDate(formData.birthDate, {
+      isTouched: true,
+      language,
+    });
     if (!birthDateValidation.isValid) {
       newErrors.birthDate = birthDateValidation.error || t('app.errBirthDate');
+    }
+
+    // Validate Room Category selection
+    if (!preferredRoomType) {
+      newErrors.preferredRoomType = t('app.errRoomType');
     }
 
     // Validate both required passport documents
@@ -276,7 +283,7 @@ export const S03_OnlineApplication: React.FC<PublicAppProps> = ({
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
 
-    if (!validateForm()) return;
+    if (!validateForm() || !preferredRoomType) return;
 
     submitApplication({
       ...formData,
@@ -286,6 +293,32 @@ export const S03_OnlineApplication: React.FC<PublicAppProps> = ({
       passportBackUrl: backDoc.previewUrl || undefined,
     });
     setSubmitted(true);
+  };
+
+  const formatPlainSpaceNumber = (amount: number) =>
+    amount.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ' ');
+
+  const selectedRoomLabel = preferredRoomType
+    ? `${t(`rooms.${preferredRoomType}`)} (${ROOM_TYPE_CAPACITY[preferredRoomType]} ${t('rooms.bedsTotal')}${
+        preferredRoomType.endsWith('_plus') ? `, ${t('rooms.panoramic')}` : ''
+      })`
+    : '';
+
+  const selectedMonthlyTariff = preferredRoomType ? settings.roomTariffs[preferredRoomType] : undefined;
+  const selectedMonthlyTariffText =
+    typeof selectedMonthlyTariff === 'number' ? formatPlainSpaceNumber(selectedMonthlyTariff) : '';
+
+  const liveContractStudentData = {
+    fullName: formData.fullName,
+    birthDate: formData.birthDate,
+    phone: formData.phone,
+    passportNumber: formData.passportNumber,
+    university: formData.university,
+    faculty: formData.faculty,
+    course: getCourseLabel(formData.degreeLevel, formData.course),
+    group: formData.group,
+    roomTypeLabel: selectedRoomLabel,
+    monthlyTariffText: selectedMonthlyTariffText,
   };
 
   const inputBaseClass = isLight
@@ -602,6 +635,7 @@ export const S03_OnlineApplication: React.FC<PublicAppProps> = ({
                 label={t('app.birthDate')}
                 required
                 theme={isLight ? 'light' : 'dark'}
+                language={language}
                 formatHint={t('app.dateFormatHint')}
                 value={formData.birthDate}
                 error={errors.birthDate}
@@ -632,14 +666,14 @@ export const S03_OnlineApplication: React.FC<PublicAppProps> = ({
                   onChange={(e) => {
                     const formatted = formatPassportNumber(e.target.value);
                     setFormData((prev) => ({ ...prev, passportNumber: formatted }));
-                    const validationErr = getPassportValidationError(formatted);
+                    const validationErr = getPassportValidationError(formatted, language);
                     setErrors((prev) => ({
                       ...prev,
                       passportNumber: validationErr || undefined,
                     }));
                   }}
                   onBlur={() => {
-                    const validationErr = getPassportValidationError(formData.passportNumber);
+                    const validationErr = getPassportValidationError(formData.passportNumber, language);
                     setErrors((prev) => ({
                       ...prev,
                       passportNumber: validationErr || undefined,
@@ -810,6 +844,47 @@ export const S03_OnlineApplication: React.FC<PublicAppProps> = ({
                   className={`w-full px-3 py-2.5 border rounded-xl transition-colors focus:outline-none focus:ring-2 focus:ring-[#C6A15B] ${inputBaseClass}`}
                 />
               </div>
+
+              <div className="sm:col-span-2">
+                <label className={labelClass}>
+                  {t('app.roomLabel')}
+                  {requiredStar}
+                </label>
+                <select
+                  required
+                  value={preferredRoomType}
+                  onChange={(e) => {
+                    setPreferredRoomType(e.target.value as RoomType | '');
+                    if (errors.preferredRoomType) {
+                      setErrors((prev) => ({ ...prev, preferredRoomType: undefined }));
+                    }
+                  }}
+                  className={`w-full px-3 py-2.5 border rounded-xl font-medium transition-colors focus:outline-none focus:ring-2 focus:ring-[#C6A15B] ${
+                    errors.preferredRoomType
+                      ? isLight
+                        ? 'border-rose-400 bg-rose-50/50 text-rose-900'
+                        : 'border-rose-500/70 bg-rose-950/30 text-rose-100'
+                      : inputBaseClass
+                  }`}
+                >
+                  <option value="">{t('app.roomSelectPlaceholder')}</option>
+                  {ROOM_TYPE_ORDER.map((typeOption) => {
+                    const price = settings.roomTariffs[typeOption];
+                    return (
+                      <option key={typeOption} value={typeOption}>
+                        {t(`rooms.${typeOption}`)} ({ROOM_TYPE_CAPACITY[typeOption]} {t('rooms.bedsTotal')}
+                        {typeOption.endsWith('_plus') ? ` · ${t('rooms.panoramic')}` : ''}) —{' '}
+                        {formatPlainSpaceNumber(price)} UZS {t('common.perMonth')}
+                      </option>
+                    );
+                  })}
+                </select>
+                {errors.preferredRoomType && (
+                  <p className="text-[11px] font-semibold text-rose-500 mt-1 flex items-center gap-1">
+                    <AlertCircle className="w-3.5 h-3.5 shrink-0" /> {errors.preferredRoomType}
+                  </p>
+                )}
+              </div>
             </div>
           </div>
 
@@ -879,7 +954,8 @@ export const S03_OnlineApplication: React.FC<PublicAppProps> = ({
           {/* Submit */}
           <button
             type="submit"
-            className={`w-full py-3.5 font-bold text-xs sm:text-sm rounded-xl shadow-lg transition-all flex items-center justify-center gap-2 mt-4 cursor-pointer ${
+            disabled={!agreedToTerms}
+            className={`w-full py-3.5 font-bold text-xs sm:text-sm rounded-xl shadow-lg transition-all flex items-center justify-center gap-2 mt-4 disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer ${
               isLight
                 ? 'bg-[#101C32] hover:bg-[#1A2D4F] border border-[#C6A15B]/50 text-[#EAD096] hover:text-white'
                 : 'bg-gradient-to-r from-[#C6A15B] to-[#EAD096] hover:brightness-110 text-[#0A101D] shadow-[#C6A15B]/20'
@@ -900,8 +976,16 @@ export const S03_OnlineApplication: React.FC<PublicAppProps> = ({
           setErrors((prev) => ({ ...prev, consent: undefined }));
           setShowContractModal(false);
         }}
+        agreedToTerms={agreedToTerms}
+        onToggleAgreed={(checked) => {
+          setAgreedToTerms(checked);
+          if (checked && errors.consent) {
+            setErrors((prev) => ({ ...prev, consent: undefined }));
+          }
+        }}
         language={language}
         isLight={isLight}
+        studentData={liveContractStudentData}
       />
     </div>
   );

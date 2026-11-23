@@ -23,7 +23,6 @@ export const S130_Settings: React.FC = () => {
     comfort: { labelKey: 'settings.comfortTariff', isPlus: false },
     comfort_plus: { labelKey: 'settings.comfortPlusTariff', isPlus: true },
     lux: { labelKey: 'settings.luxTariff', isPlus: false },
-    lux_plus: { labelKey: 'settings.luxPlusTariff', isPlus: true },
   };
 
   const handleSave = (e: React.FormEvent) => {
@@ -65,7 +64,7 @@ export const S130_Settings: React.FC = () => {
           </div>
         </div>
 
-        {/* Tariffs (6 Room Categories) */}
+        {/* Tariffs (5 Room Categories) */}
         <div>
           <h3 className="font-extrabold text-slate-900 text-sm mb-3 border-b border-slate-100 pb-2">
             2. {t('settings.tariffs')} (UZS)

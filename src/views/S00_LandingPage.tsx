@@ -1,6 +1,7 @@
 import React, { useState, useRef } from 'react';
 import { useDorm } from '../context/DormContext';
 import { useI18n } from '../i18n/I18nContext';
+import { resolveAssetPath } from '../utils/assetPath';
 import {
   Wifi,
   ShieldCheck,
@@ -80,7 +81,6 @@ export interface LandingTranslations {
     desc: string;
     placeholder: string;
     btn: string;
-    samplesLabel: string;
     coursePrefix: string;
     courseSuffix: string;
     notFoundQuery: string;
@@ -212,7 +212,6 @@ export const HERO_CONTENT: Record<'UZ' | 'RU' | 'EN', LandingTranslations> = {
       desc: 'Ariza ID yoki pasport raqamingiz orqali joriy holatni ko‘ring.',
       placeholder: 'Ariza ID yoki pasport raqami',
       btn: 'Holatni ko‘rish →',
-      samplesLabel: 'Namunalar:',
       coursePrefix: '',
       courseSuffix: '-kurs',
       notFoundQuery: 'bo‘yicha ariza topilmadi',
@@ -258,7 +257,6 @@ export const HERO_CONTENT: Record<'UZ' | 'RU' | 'EN', LandingTranslations> = {
         lux: '4 o‘rinli',
         standard_plus: '8 o‘rinli',
         comfort_plus: '6 o‘rinli',
-        lux_plus: '4 o‘rinli',
       },
       buttonTexts: {
         standard: 'STANDARD UCHUN ARIZA TOPSHIRISH',
@@ -266,7 +264,6 @@ export const HERO_CONTENT: Record<'UZ' | 'RU' | 'EN', LandingTranslations> = {
         lux: 'LUX UCHUN ARIZA TOPSHIRISH',
         standard_plus: 'STANDARD PLUS UCHUN ARIZA TOPSHIRISH',
         comfort_plus: 'COMFORT PLUS UCHUN ARIZA TOPSHIRISH',
-        lux_plus: 'LUX PLUS UCHUN ARIZA TOPSHIRISH',
       },
       features: [
         'Shaxsiy shkaf va o‘quv stoli',
@@ -371,7 +368,6 @@ export const HERO_CONTENT: Record<'UZ' | 'RU' | 'EN', LandingTranslations> = {
       desc: 'Узнайте текущий статус по ID заявки или номеру паспорта.',
       placeholder: 'ID заявки или номер паспорта',
       btn: 'Проверить статус →',
-      samplesLabel: 'Примеры:',
       coursePrefix: '',
       courseSuffix: '-курс',
       notFoundQuery: '— заявка не найдена',
@@ -417,7 +413,6 @@ export const HERO_CONTENT: Record<'UZ' | 'RU' | 'EN', LandingTranslations> = {
         lux: '4-местный',
         standard_plus: '8-местный',
         comfort_plus: '6-местный',
-        lux_plus: '4-местный',
       },
       buttonTexts: {
         standard: 'ПОДАТЬ ЗАЯВКУ НА STANDARD',
@@ -425,7 +420,6 @@ export const HERO_CONTENT: Record<'UZ' | 'RU' | 'EN', LandingTranslations> = {
         lux: 'ПОДАТЬ ЗАЯВКУ НА LUX',
         standard_plus: 'ПОДАТЬ ЗАЯВКУ НА STANDARD PLUS',
         comfort_plus: 'ПОДАТЬ ЗАЯВКУ НА COMFORT PLUS',
-        lux_plus: 'ПОДАТЬ ЗАЯВКУ НА LUX PLUS',
       },
       features: [
         'Индивидуальный шкаф и учебный стол',
@@ -530,7 +524,6 @@ export const HERO_CONTENT: Record<'UZ' | 'RU' | 'EN', LandingTranslations> = {
       desc: 'Track your current status using your Application ID or passport number.',
       placeholder: 'Application ID or passport number',
       btn: 'Check Status →',
-      samplesLabel: 'Samples:',
       coursePrefix: 'Year ',
       courseSuffix: '',
       notFoundQuery: '— application not found',
@@ -576,7 +569,6 @@ export const HERO_CONTENT: Record<'UZ' | 'RU' | 'EN', LandingTranslations> = {
         lux: '4-bed',
         standard_plus: '8-bed',
         comfort_plus: '6-bed',
-        lux_plus: '4-bed',
       },
       buttonTexts: {
         standard: 'APPLY FOR STANDARD',
@@ -584,7 +576,6 @@ export const HERO_CONTENT: Record<'UZ' | 'RU' | 'EN', LandingTranslations> = {
         lux: 'APPLY FOR LUX',
         standard_plus: 'APPLY FOR STANDARD PLUS',
         comfort_plus: 'APPLY FOR COMFORT PLUS',
-        lux_plus: 'APPLY FOR LUX PLUS',
       },
       features: [
         'Personal wardrobe & study desk',
@@ -715,12 +706,12 @@ export const S00_LandingPage: React.FC<LandingPageProps> = ({
 
   // Landscape Horizontal Gallery photography showcase (6 curated photos)
   const galleryImages = [
-    '/assets/aistudio/photo_2026-11-19_19-13-49_c9cab8ec.jpg',
-    '/assets/aistudio/photo_2026-11-20_15-27-24_1dd70b85.jpg',
-    '/assets/aistudio/photo_2026-11-20_15-27-23__2__657810dd.jpg',
-    '/assets/aistudio/photo_2026-11-20_15-27-23_f9dbedfe.jpg',
-    '/assets/aistudio/photo_2026-11-19_19-13-50_dc375aa7.jpg',
-    '/assets/aistudio/photo_2026-11-20_15-35-47_82e8d152.jpg',
+    resolveAssetPath('assets/aistudio/photo_2026-11-19_19-13-49_c9cab8ec.jpg'),
+    resolveAssetPath('assets/aistudio/photo_2026-11-20_15-27-24_1dd70b85.jpg'),
+    resolveAssetPath('assets/aistudio/photo_2026-11-20_15-27-23__2__657810dd.jpg'),
+    resolveAssetPath('assets/aistudio/photo_2026-11-20_15-27-23_f9dbedfe.jpg'),
+    resolveAssetPath('assets/aistudio/photo_2026-11-19_19-13-50_dc375aa7.jpg'),
+    resolveAssetPath('assets/aistudio/photo_2026-11-20_15-35-47_82e8d152.jpg'),
   ];
 
   const [activeImageIndex, setActiveImageIndex] = useState(0);
@@ -766,7 +757,6 @@ export const S00_LandingPage: React.FC<LandingPageProps> = ({
     comfort: 1200000,
     comfort_plus: 1400000,
     lux: 1400000,
-    lux_plus: 1600000,
   };
 
   const formatRoomPrice = (amount: number) => {
@@ -822,14 +812,7 @@ export const S00_LandingPage: React.FC<LandingPageProps> = ({
     setSearchedApp(found || 'not_found');
   };
 
-  const handleSampleClick = (sampleId: string) => {
-    setTrackerQuery(sampleId);
-    setTrackerHasSearched(true);
-    const found = applications.find((app) => app.id.toUpperCase() === sampleId.toUpperCase());
-    setSearchedApp(found || 'not_found');
-  };
-
-  // All 6 distinct room categories synced with settings.roomTariffs
+  // All 5 distinct room categories synced with settings.roomTariffs
   const roomCards: Array<{
     id: RoomType;
     title: string;
@@ -841,7 +824,7 @@ export const S00_LandingPage: React.FC<LandingPageProps> = ({
     {
       id: 'standard',
       title: 'Standard',
-      image: '/images/room-standard.jpg',
+      image: resolveAssetPath('images/room-standard.jpg'),
       isPanoramic: false,
       featured: false,
       defaultRate: 1000000,
@@ -849,7 +832,7 @@ export const S00_LandingPage: React.FC<LandingPageProps> = ({
     {
       id: 'standard_plus',
       title: 'Standard Plus',
-      image: '/assets/aistudio/DSC00095_0f4ba2e0.JPG',
+      image: resolveAssetPath('assets/aistudio/DSC00095_0f4ba2e0.JPG'),
       isPanoramic: true,
       featured: false,
       defaultRate: 1200000,
@@ -857,7 +840,7 @@ export const S00_LandingPage: React.FC<LandingPageProps> = ({
     {
       id: 'comfort',
       title: 'Comfort',
-      image: '/images/room-comfort.jpg',
+      image: resolveAssetPath('images/room-comfort.jpg'),
       isPanoramic: false,
       featured: false,
       defaultRate: 1200000,
@@ -865,7 +848,7 @@ export const S00_LandingPage: React.FC<LandingPageProps> = ({
     {
       id: 'comfort_plus',
       title: 'Comfort Plus',
-      image: '/assets/aistudio/DSC00093_68cdaf92.JPG',
+      image: resolveAssetPath('assets/aistudio/DSC00093_68cdaf92.JPG'),
       isPanoramic: true,
       featured: true,
       defaultRate: 1400000,
@@ -873,18 +856,10 @@ export const S00_LandingPage: React.FC<LandingPageProps> = ({
     {
       id: 'lux',
       title: 'Lux',
-      image: '/images/room-luxe.jpg',
+      image: resolveAssetPath('images/room-luxe.jpg'),
       isPanoramic: false,
       featured: false,
       defaultRate: 1400000,
-    },
-    {
-      id: 'lux_plus',
-      title: 'Lux Plus',
-      image: '/assets/aistudio/DSC00113_a9ca5eeb.JPG',
-      isPanoramic: true,
-      featured: false,
-      defaultRate: 1600000,
     },
   ];
 
@@ -1251,8 +1226,7 @@ export const S00_LandingPage: React.FC<LandingPageProps> = ({
           aria-hidden="true"
           className="absolute inset-0 z-0 bg-cover bg-[position:68%_center] md:bg-[position:85%_center] lg:bg-right pointer-events-none"
           style={{
-            backgroundImage:
-              "url('/assets/aistudio/file_00000000118082468627a3e20b36fd2c_10c5a52b.png')",
+            backgroundImage: `url('${resolveAssetPath('assets/aistudio/file_00000000118082468627a3e20b36fd2c_10c5a52b.png')}')`,
           }}
         />
 
@@ -1890,7 +1864,7 @@ export const S00_LandingPage: React.FC<LandingPageProps> = ({
           >
             {/* Header */}
             <div
-              className={`flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-5 pb-5 border-b ${
+              className={`mb-5 pb-5 border-b ${
                 isLight ? 'border-slate-200/80' : 'border-slate-800/80'
               }`}
             >
@@ -1909,35 +1883,6 @@ export const S00_LandingPage: React.FC<LandingPageProps> = ({
                 >
                   {content.statusSearch.desc}
                 </p>
-              </div>
-
-              {/* Sleek Sample Chips */}
-              <div className="flex items-center gap-1.5 flex-wrap shrink-0">
-                <span className={`text-xs mr-0.5 ${isLight ? 'text-slate-500' : 'text-slate-400'}`}>
-                  {content.statusSearch.samplesLabel}
-                </span>
-                <button
-                  type="button"
-                  onClick={() => handleSampleClick('APP-1001')}
-                  className={`text-xs px-2.5 py-1 rounded-md border font-semibold tabular-nums transition-colors cursor-pointer ${
-                    isLight
-                      ? 'bg-[#F8FAFC] border-slate-200 text-[#0A101D] hover:bg-[#C6A15B] hover:border-[#C6A15B]'
-                      : 'bg-[#182642] hover:bg-[#C6A15B] hover:text-[#0A101D] text-[#C6A15B] border-[#C6A15B]/30 hover:border-[#C6A15B]'
-                  }`}
-                >
-                  APP-1001
-                </button>
-                <button
-                  type="button"
-                  onClick={() => handleSampleClick('APP-1002')}
-                  className={`text-xs px-2.5 py-1 rounded-md border font-semibold tabular-nums transition-colors cursor-pointer ${
-                    isLight
-                      ? 'bg-[#F8FAFC] border-slate-200 text-[#0A101D] hover:bg-[#C6A15B] hover:border-[#C6A15B]'
-                      : 'bg-[#182642] hover:bg-[#C6A15B] hover:text-[#0A101D] text-[#C6A15B] border-[#C6A15B]/30 hover:border-[#C6A15B]'
-                  }`}
-                >
-                  APP-1002
-                </button>
               </div>
             </div>
 

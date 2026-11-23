@@ -1,34 +1,64 @@
+import { Language } from '../i18n/types';
+
 /**
  * Date validation and masking utilities for DD.MM.YYYY format.
  * Includes precise Gregorian calendar rules, leap year computation,
  * month-day limit checking, and real-time localized error messaging.
  */
 
-export const MONTH_NAMES_UZ: Record<number, string> = {
-  1: 'Yanvar',
-  2: 'Fevral',
-  3: 'Mart',
-  4: 'Aprel',
-  5: 'May',
-  6: 'Iyun',
-  7: 'Iyul',
-  8: 'Avgust',
-  9: 'Sentabr',
-  10: 'Oktabr',
-  11: 'Noyabr',
-  12: 'Dekabr',
+export const MONTH_NAMES_BY_LANG: Record<Language, Record<number, string>> = {
+  uz: {
+    1: 'Yanvar',
+    2: 'Fevral',
+    3: 'Mart',
+    4: 'Aprel',
+    5: 'May',
+    6: 'Iyun',
+    7: 'Iyul',
+    8: 'Avgust',
+    9: 'Sentabr',
+    10: 'Oktabr',
+    11: 'Noyabr',
+    12: 'Dekabr',
+  },
+  ru: {
+    1: 'Январь',
+    2: 'Февраль',
+    3: 'Март',
+    4: 'Апрель',
+    5: 'Май',
+    6: 'Июнь',
+    7: 'Июль',
+    8: 'Август',
+    9: 'Сентябрь',
+    10: 'Октябрь',
+    11: 'Ноябрь',
+    12: 'Декабрь',
+  },
+  en: {
+    1: 'January',
+    2: 'February',
+    3: 'March',
+    4: 'April',
+    5: 'May',
+    6: 'June',
+    7: 'July',
+    8: 'August',
+    9: 'September',
+    10: 'October',
+    11: 'November',
+    12: 'December',
+  },
 };
+
+export const MONTH_NAMES_UZ = MONTH_NAMES_BY_LANG.uz;
 
 /**
  * Checks if a given year is a leap year (kabisa yili).
- * Gregorian calendar leap year rule:
- * - Divisible by 4 AND NOT divisible by 100, OR
- * - Divisible by 400.
- * Examples: 2000 (leap), 2004 (leap), 2024 (leap), 1900 (not leap), 2023 (not leap), 2025 (not leap).
  */
 export function isLeapYear(year: number): boolean {
   if (isNaN(year) || year <= 0) return false;
-  return (year % 4 === 0 && year % 100 !== 0) || (year % 400 === 0);
+  return (year % 4 === 0 && year % 100 !== 0) || year % 400 === 0;
 }
 
 /**
@@ -40,7 +70,7 @@ export function getDaysInMonth(month: number, year?: number): number {
     if (year !== undefined && !isNaN(year) && year > 0) {
       return isLeapYear(year) ? 29 : 28;
     }
-    return 29; // While year is not yet typed, allow up to 29
+    return 29;
   }
   if ([4, 6, 9, 11].includes(month)) {
     return 30;
@@ -49,12 +79,10 @@ export function getDaysInMonth(month: number, year?: number): number {
 }
 
 /**
- * Strips non-digits and automatically formats input as DD.MM.YYYY mask
- * Max length: 10 chars (2 day + 1 dot + 2 month + 1 dot + 4 year)
+ * Strips non-digits and automatically formats input as DD.MM.YYYY mask.
  */
 export function formatDateMask(value: string): string {
   if (!value) return '';
-  // Faqat raqamlarni qoldirish (max 8 ta raqam)
   const cleaned = value.replace(/\D/g, '').slice(0, 8);
 
   if (cleaned.length <= 2) {
@@ -67,16 +95,14 @@ export function formatDateMask(value: string): string {
 }
 
 /**
- * Converts "YYYY-MM-DD" (ISO) or "DD.MM.YYYY" to "DD.MM.YYYY"
+ * Converts "YYYY-MM-DD" (ISO) or "DD.MM.YYYY" to "DD.MM.YYYY".
  */
 export function normalizeToDisplayDate(val: string): string {
   if (!val) return '';
   const trimmed = val.trim();
-  // Already DD.MM.YYYY
   if (/^\d{2}\.\d{2}\.\d{4}$/.test(trimmed)) {
     return trimmed;
   }
-  // ISO YYYY-MM-DD
   if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) {
     const [y, m, d] = trimmed.split('-');
     return `${d}.${m}.${y}`;
@@ -85,7 +111,7 @@ export function normalizeToDisplayDate(val: string): string {
 }
 
 /**
- * Converts "DD.MM.YYYY" to "YYYY-MM-DD" (ISO)
+ * Converts "DD.MM.YYYY" to "YYYY-MM-DD" (ISO).
  */
 export function displayToIsoDate(display: string): string {
   if (!display) return '';
@@ -109,13 +135,7 @@ export interface DateValidationResult {
 }
 
 /**
- * Validates a date string in real-time according to Gregorian calendar rules:
- * - Checks day bounds (01-31)
- * - Checks month bounds (01-12)
- * - Checks 30-day months (Apr, Jun, Sep, Nov cannot have 31 days)
- * - Checks February days (28 days normally, 29 days strictly in leap years)
- * - Checks year realism (e.g. 1920 <= year <= currentYear)
- * - Checks against future birth dates
+ * Validates a date string in real-time according to Gregorian calendar rules across UZ, RU, and EN.
  */
 export function validateCalendarDate(
   value: string,
@@ -124,6 +144,7 @@ export function validateCalendarDate(
     maxYear?: number;
     allowFuture?: boolean;
     isTouched?: boolean;
+    language?: Language;
   } = {}
 ): DateValidationResult {
   const {
@@ -131,13 +152,119 @@ export function validateCalendarDate(
     maxYear = new Date().getFullYear(),
     allowFuture = false,
     isTouched = false,
+    language = 'uz',
   } = options;
+
+  const msg = {
+    required:
+      language === 'ru'
+        ? 'Дата рождения обязательна (ДД.ММ.ГГГГ)'
+        : language === 'en'
+        ? 'Date of birth is required (DD.MM.YYYY)'
+        : 'Tug‘ilgan sana kiritilishi shart (KK.OO.YYYY)',
+    dayZero:
+      language === 'ru'
+        ? 'День не может быть 00 (введите от 01 до 31)'
+        : language === 'en'
+        ? 'Day cannot be 00 (enter between 01 and 31)'
+        : 'Kun 00 bo‘lishi mumkin emas (01-31 oralig‘ida kiriting)',
+    dayOver31: (d: number) =>
+      language === 'ru'
+        ? `Неверный день: ${d}. В месяце не более 31 дня`
+        : language === 'en'
+        ? `Invalid day: ${d}. A month has at most 31 days`
+        : `Noto‘g‘ri kun: ${d}. Oyda ko‘pi bilan 31 kun bo‘lishi mumkin`,
+    monthZero:
+      language === 'ru'
+        ? 'Месяц не может быть 00 (введите от 01 до 12)'
+        : language === 'en'
+        ? 'Month cannot be 00 (enter between 01 and 12)'
+        : 'Oy 00 bo‘lishi mumkin emas (01-12 oralig‘ida kiriting)',
+    monthOver12: (m: number) =>
+      language === 'ru'
+        ? `Неверный месяц: ${m}. В году только 12 месяцев`
+        : language === 'en'
+        ? `Invalid month: ${m}. A year only has 12 months`
+        : `Noto‘g‘ri oy: ${m}. Bir yilda faqat 12 oy mavjud`,
+    month30: (name: string, d: number) =>
+      language === 'ru'
+        ? `В месяце ${name} только 30 дней (дня ${d} не существует)`
+        : language === 'en'
+        ? `${name} only has 30 days (day ${d} does not exist)`
+        : `${name} oyida faqat 30 kun bor (${d}-kun mavjud emas)`,
+    febOver29: (d: number) =>
+      language === 'ru'
+        ? `В феврале не более 29 дней (дня ${d} не существует)`
+        : language === 'en'
+        ? `February has at most 29 days (day ${d} does not exist)`
+        : `Fevral oyida ko‘pi bilan 29 kun bo‘lishi mumkin (${d}-kun mavjud emas)`,
+    incomplete: (v: string) =>
+      language === 'ru'
+        ? `Введите дату полностью (ДД.ММ.ГГГГ). Сейчас: ${v}`
+        : language === 'en'
+        ? `Enter full date (DD.MM.YYYY). Current: ${v}`
+        : `Sanani to‘liq kiriting (KK.OO.YYYY). Hozir: ${v}`,
+    nonLeapFeb: (y: number) =>
+      language === 'ru'
+        ? `${y} год не является високосным! В феврале только 28 дней`
+        : language === 'en'
+        ? `${y} is not a leap year! February only has 28 days`
+        : `${y}-yil kabisa yili emas! Fevral oyida faqat 28 kun bor`,
+    febMax: (y: number, maxD: number) =>
+      language === 'ru'
+        ? `В феврале ${y} г. не более ${maxD} дней`
+        : language === 'en'
+        ? `February ${y} has at most ${maxD} days`
+        : `Fevral oyida ko‘pi bilan ${maxD} kun bor (${y}-yil)`,
+    monthMax: (name: string, maxD: number, d: number) =>
+      language === 'ru'
+        ? `В месяце ${name} только ${maxD} дней (дня ${d} не существует)`
+        : language === 'en'
+        ? `${name} has only ${maxD} days (day ${d} does not exist)`
+        : `${name} oyida faqat ${maxD} kun bor (${d}-kun mavjud emas)`,
+    yearMin: (y: number) =>
+      language === 'ru'
+        ? `Год рождения должен быть после ${minYear} (${y})`
+        : language === 'en'
+        ? `Birth year must be after ${minYear} (${y})`
+        : `Tug‘ilgan yil ${minYear}-yildan keyin bo‘lishi kerak (${y})`,
+    futureYear: (y: number, cy: number) =>
+      language === 'ru'
+        ? `Дата рождения не может быть в будущем (${y} > ${cy})`
+        : language === 'en'
+        ? `Date of birth cannot be in the future (${y} > ${cy})`
+        : `Tug‘ilgan sana kelajakda bo‘lishi mumkin emas (${y} > ${cy})`,
+    futureToday:
+      language === 'ru'
+        ? 'Дата рождения не может быть позже сегодняшнего дня'
+        : language === 'en'
+        ? 'Date of birth cannot be later than today'
+        : 'Tug‘ilgan sana bugungi kundan keyin bo‘lishi mumkin emas',
+    yearMax: (my: number) =>
+      language === 'ru'
+        ? `Год не может быть больше ${my}`
+        : language === 'en'
+        ? `Year cannot exceed ${my}`
+        : `Yil ko‘pi bilan ${my} bo‘lishi mumkin`,
+    leapOk: (y: number) =>
+      language === 'ru'
+        ? `${y} г. — високосный год (29 февраля подтверждено)`
+        : language === 'en'
+        ? `${y} is a leap year (February 29 confirmed)`
+        : `${y}-yil kabisa yili (29-fevral tasdiqlandi)`,
+    validOk:
+      language === 'ru'
+        ? 'Корректная календарная дата'
+        : language === 'en'
+        ? 'Valid calendar date'
+        : 'To‘g‘ri taqvim sanasi',
+  };
 
   if (!value || !value.trim()) {
     return {
       isValid: false,
       isComplete: false,
-      error: isTouched ? 'Tug‘ilgan sana kiritilishi shart (KK.OO.YYYY)' : null,
+      error: isTouched ? msg.required : null,
     };
   }
 
@@ -146,77 +273,76 @@ export function validateCalendarDate(
     return { isValid: false, isComplete: false, error: null };
   }
 
-  // 1. Day validation (first 2 digits)
+  const monthMap = MONTH_NAMES_BY_LANG[language] || MONTH_NAMES_BY_LANG.uz;
+
+  // 1. Day validation
   const dayStr = rawDigits.slice(0, 2);
   const day = parseInt(dayStr, 10);
 
   if (dayStr.length === 2) {
     if (day === 0) {
-      return { isValid: false, isComplete: false, error: 'Kun 00 bo‘lishi mumkin emas (01-31 oralig‘ida kiriting)' };
+      return { isValid: false, isComplete: false, error: msg.dayZero };
     }
     if (day > 31) {
-      return { isValid: false, isComplete: false, error: `Noto‘g‘ri kun: ${day}. Oyda ko‘pi bilan 31 kun bo‘lishi mumkin` };
+      return { isValid: false, isComplete: false, error: msg.dayOver31(day) };
     }
   }
 
-  // 2. Month validation (digits 3-4)
+  // 2. Month validation
   if (rawDigits.length >= 3) {
     const monthStr = rawDigits.slice(2, 4);
     if (monthStr.length === 2) {
       const month = parseInt(monthStr, 10);
       if (month === 0) {
-        return { isValid: false, isComplete: false, error: 'Oy 00 bo‘lishi mumkin emas (01-12 oralig‘ida kiriting)' };
+        return { isValid: false, isComplete: false, error: msg.monthZero };
       }
       if (month > 12) {
-        return { isValid: false, isComplete: false, error: `Noto‘g‘ri oy: ${month}. Bir yilda faqat 12 oy mavjud` };
+        return { isValid: false, isComplete: false, error: msg.monthOver12(month) };
       }
 
-      const monthName = MONTH_NAMES_UZ[month] || `${month}-oy`;
+      const monthName = monthMap[month] || `${month}`;
 
-      // 30-day month checks
       if ([4, 6, 9, 11].includes(month) && day > 30) {
         return {
           isValid: false,
           isComplete: false,
-          error: `${monthName} oyida faqat 30 kun bor (${day}-kun mavjud emas)`,
+          error: msg.month30(monthName, day),
         };
       }
 
-      // February check before year is fully entered
       if (month === 2 && day > 29) {
         return {
           isValid: false,
           isComplete: false,
-          error: `Fevral oyida ko‘pi bilan 29 kun bo‘lishi mumkin (${day}-kun mavjud emas)`,
+          error: msg.febOver29(day),
         };
       }
     }
   }
 
-  // 3. Incomplete date check
+  // 3. Incomplete check
   if (rawDigits.length < 8) {
     return {
       isValid: false,
       isComplete: false,
-      error: isTouched ? `Sanani to‘liq kiriting (KK.OO.YYYY). Hozir: ${value}` : null,
+      error: isTouched ? msg.incomplete(value) : null,
       day: dayStr.length === 2 ? day : undefined,
     };
   }
 
-  // 4. Full date validation with Year (all 8 digits: DDMMYYYY)
+  // 4. Full date validation
   const month = parseInt(rawDigits.slice(2, 4), 10);
   const year = parseInt(rawDigits.slice(4, 8), 10);
-  const monthName = MONTH_NAMES_UZ[month] || `${month}-oy`;
+  const monthName = monthMap[month] || `${month}`;
   const leap = isLeapYear(year);
 
-  // February leap year validation
   if (month === 2) {
     if (!leap && day === 29) {
       return {
         isValid: false,
         isComplete: true,
         isLeapYear: false,
-        error: `${year}-yil kabisa yili emas! Fevral oyida faqat 28 kun bor`,
+        error: msg.nonLeapFeb(year),
       };
     }
     if (day > 29) {
@@ -224,27 +350,25 @@ export function validateCalendarDate(
         isValid: false,
         isComplete: true,
         isLeapYear: leap,
-        error: `Fevral oyida ko‘pi bilan ${leap ? 29 : 28} kun bor (${year}-yil)`,
+        error: msg.febMax(year, leap ? 29 : 28),
       };
     }
   }
 
-  // Standard month limit check
   const maxDays = getDaysInMonth(month, year);
   if (day > maxDays) {
     return {
       isValid: false,
       isComplete: true,
-      error: `${monthName} oyida faqat ${maxDays} kun bor (${day}-kun mavjud emas)`,
+      error: msg.monthMax(monthName, maxDays, day),
     };
   }
 
-  // Year range constraints
   if (year < minYear) {
     return {
       isValid: false,
       isComplete: true,
-      error: `Tug‘ilgan yil ${minYear}-yildan keyin bo‘lishi kerak (${year})`,
+      error: msg.yearMin(year),
     };
   }
 
@@ -256,7 +380,7 @@ export function validateCalendarDate(
       return {
         isValid: false,
         isComplete: true,
-        error: `Tug‘ilgan sana kelajakda bo‘lishi mumkin emas (${year} > ${currentYear})`,
+        error: msg.futureYear(year, currentYear),
       };
     }
 
@@ -267,7 +391,7 @@ export function validateCalendarDate(
         return {
           isValid: false,
           isComplete: true,
-          error: 'Tug‘ilgan sana bugungi kundan keyin bo‘lishi mumkin emas',
+          error: msg.futureToday,
         };
       }
     }
@@ -275,14 +399,12 @@ export function validateCalendarDate(
     return {
       isValid: false,
       isComplete: true,
-      error: `Yil ko‘pi bilan ${maxYear} bo‘lishi mumkin`,
+      error: msg.yearMax(maxYear),
     };
   }
 
   const isoDate = `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
-  const successMessage = (month === 2 && day === 29)
-    ? `${year}-yil kabisa yili (29-fevral tasdiqlandi)`
-    : 'To‘g‘ri taqvim sanasi';
+  const successMessage = month === 2 && day === 29 ? msg.leapOk(year) : msg.validOk;
 
   return {
     isValid: true,
