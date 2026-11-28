@@ -1,11 +1,17 @@
 import React, { useState } from 'react';
 import { useDorm } from '../context/DormContext';
 import { useI18n } from '../i18n/I18nContext';
+import {
+  comparePaymentsChronoDesc,
+  formatDateTimeDisplay,
+  formatFloorRoomBedDisplay,
+  formatMethodLabel,
+} from '../utils/billingUtils';
 import { Printer, FileSpreadsheet, Download } from 'lucide-react';
 
 export const S110_Reports: React.FC = () => {
   const { stats, rooms, payments, students } = useDorm();
-  const { t, formatCurrency, formatNumber } = useI18n();
+  const { t, language, formatCurrency, formatNumber } = useI18n();
   const [reportCategory, setReportCategory] = useState<'occupancy' | 'payments' | 'debt'>('occupancy');
 
   const handleDownloadCSV = () => {
@@ -66,19 +72,40 @@ export const S110_Reports: React.FC = () => {
     // 4. So'nggi to'lovlar jurnali (Recent payment records)
     if (payments && payments.length > 0) {
       rows.push(['=== 4. SO\'NGGI TO\'LOVLAR RO\'YXATI (PAYMENT TRANSACTIONS) ===']);
-      rows.push(['ID', 'Talaba F.I.Sh.', 'Xona', 'Summa (UZS)', 'To\'lov sanasi', 'Qaysi oy uchun', 'To\'lov usuli', 'Holati']);
-      payments.slice(0, 100).forEach((p) => {
-        rows.push([
-          p.id,
-          p.studentName || '',
-          p.roomNumber || '',
-          p.amount,
-          p.paymentDate || '',
-          p.periodMonth || '',
-          p.paymentMethod || '',
-          p.status || ''
-        ]);
-      });
+      rows.push([
+        'ID',
+        'Talaba F.I.Sh.',
+        'Qavat / Xona / Yotoq',
+        'To\'lov sanasi va vaqti',
+        'Band / Davr',
+        'Summa (UZS)',
+        'Band qoldig\'i (UZS)',
+        'To\'lov usuli',
+        'Izoh',
+        'Holati',
+      ]);
+      [...payments]
+        .sort(comparePaymentsChronoDesc)
+        .slice(0, 200)
+        .forEach((p) => {
+          rows.push([
+            p.id,
+            p.studentName || '',
+            formatFloorRoomBedDisplay({
+              floor: p.floor,
+              roomNumber: p.roomNumber,
+              bedLabel: p.bedLabel,
+              lang: language,
+            }),
+            formatDateTimeDisplay(p.paymentDate, p.paymentTime),
+            p.periodMonth || '',
+            p.amount,
+            p.itemRemainingAfter ?? '',
+            formatMethodLabel(p.paymentMethod, language),
+            p.notes || '',
+            p.status || '',
+          ]);
+        });
     }
 
     const csvContent = BOM + rows.map((row) =>

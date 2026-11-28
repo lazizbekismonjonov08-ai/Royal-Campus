@@ -2,6 +2,7 @@ import React, { useState, useRef } from 'react';
 import { useDorm } from '../context/DormContext';
 import { useI18n } from '../i18n/I18nContext';
 import { resolveAssetPath } from '../utils/assetPath';
+import { normalizePhoneKey } from '../utils/authCrypto';
 import {
   Wifi,
   ShieldCheck,
@@ -33,6 +34,7 @@ import {
   Sun,
   Moon,
   Send,
+  LogIn,
 } from 'lucide-react';
 import { BrandLogo } from '../components/BrandLogo';
 import { LanguageSwitcher } from '../components/LanguageSwitcher';
@@ -86,6 +88,8 @@ export interface LandingTranslations {
     notFoundQuery: string;
     notFoundDesc: string;
     newApplicationBtn: string;
+    activateCabinetBtn: string;
+    assignedBedPrefix: string;
     statuses: {
       approved: string;
       under_review: string;
@@ -114,8 +118,6 @@ export interface LandingTranslations {
     monthSuffixLower: string;
     subPriceInfo: string;
     popularBadge: string;
-    panoramicBadge: string;
-    panoramicBullet: string;
     viewDetails: string;
     closeDetails: string;
     monthlyRateLabel: string;
@@ -209,28 +211,30 @@ export const HERO_CONTENT: Record<'UZ' | 'RU' | 'EN', LandingTranslations> = {
     },
     statusSearch: {
       title: 'Ariza holatini tekshirish',
-      desc: 'Ariza ID yoki pasport raqamingiz orqali joriy holatni ko‘ring.',
-      placeholder: 'Ariza ID yoki pasport raqami',
+      desc: 'Ariza ID, pasport yoki telefon raqamingiz orqali joriy holatni ko‘ring.',
+      placeholder: 'Ariza ID (RC-2026-...), pasport yoki telefon',
       btn: 'Holatni ko‘rish →',
       coursePrefix: '',
       courseSuffix: '-kurs',
       notFoundQuery: 'bo‘yicha ariza topilmadi',
-      notFoundDesc: 'Iltimos, kiritilgan ID yoki pasport raqamini tekshirib qayta urinib ko‘ring yoki yangi ariza yuboring.',
+      notFoundDesc: 'Iltimos, kiritilgan ID, pasport yoki telefon raqamini tekshirib qayta urinib ko‘ring yoki yangi ariza yuboring.',
       newApplicationBtn: 'Yangi ariza topshirish',
+      activateCabinetBtn: 'Rezident kabinetini faollashtirish / kirish',
+      assignedBedPrefix: 'o‘rin:',
       statuses: {
         approved: 'Tasdiqlangan',
         under_review: 'Ko‘rib chiqilmoqda',
-        new: 'Qabul qilingan (Navbatda)',
+        new: 'Kutilmoqda (Navbatda)',
         correction_requested: 'Qo‘shimcha ma’lumot so‘ralgan',
         rejected: 'Rad etilgan',
       },
       guidance: {
         approvedTitle: 'Tabriklaymiz! Arizangiz ma’muriyat tomonidan tasdiqlandi.',
         approvedRoomPrefix: 'Sizga',
-        approvedRoomSuffix: '-xona ajratildi. Shartnoma tuzish va kalitni qabul qilish uchun ma’muriyatga (101-qabulxona) murojaat qiling.',
+        approvedRoomSuffix: 'Xona ajratildi. Shartnoma va to‘lov jadvalini ko‘rish uchun Rezident kabinetiga kiring.',
         underReviewTitle: 'Hujjatlaringiz ayni vaqtda komissiya tomonidan o‘rganilmoqda.',
         underReviewDesc: 'Ko‘rib chiqish muddati: 24–48 soat. Natija haqida SMS yoki Telegram orqali xabar beriladi.',
-        newTitle: 'Arizangiz muvaffaqiyatli qabul qilindi va navbatga kiritildi.',
+        newTitle: 'Arizangiz muvaffaqiyatli qabul qilindi va ko‘rib chiqilishini kutmoqda.',
         newDatePrefix: 'Topshirilgan sana:',
         correctionTitle: 'Hujjatlaringizda aniqlashtirish talab etiladi:',
         correctionFallback: 'Iltimos, pasport nusxasi yoki o‘qish ma’lumotnomangizni yangilang.',
@@ -245,8 +249,6 @@ export const HERO_CONTENT: Record<'UZ' | 'RU' | 'EN', LandingTranslations> = {
       monthSuffixLower: '/ oyiga',
       subPriceInfo: 'Kommunal to‘lovlar va Wi-Fi narx ichida',
       popularBadge: 'ENG OMMABOP TANLOV ★',
-      panoramicBadge: 'PANORAMALI',
-      panoramicBullet: 'Keng panoramali derazalar',
       viewDetails: 'Batafsil',
       closeDetails: 'Yopish',
       monthlyRateLabel: 'Oylik tarif',
@@ -259,11 +261,11 @@ export const HERO_CONTENT: Record<'UZ' | 'RU' | 'EN', LandingTranslations> = {
         comfort_plus: '6 o‘rinli',
       },
       buttonTexts: {
-        standard: 'STANDARD UCHUN ARIZA TOPSHIRISH',
-        comfort: 'COMFORT UCHUN ARIZA TOPSHIRISH',
-        lux: 'LUX UCHUN ARIZA TOPSHIRISH',
-        standard_plus: 'STANDARD PLUS UCHUN ARIZA TOPSHIRISH',
-        comfort_plus: 'COMFORT PLUS UCHUN ARIZA TOPSHIRISH',
+        standard: 'Standard uchun ariza topshirish',
+        comfort: 'Comfort uchun ariza topshirish',
+        lux: 'Lux uchun ariza topshirish',
+        standard_plus: 'Standard plus uchun ariza topshirish',
+        comfort_plus: 'Comfort plus uchun ariza topshirish',
       },
       features: [
         'Shaxsiy shkaf va o‘quv stoli',
@@ -286,7 +288,7 @@ export const HERO_CONTENT: Record<'UZ' | 'RU' | 'EN', LandingTranslations> = {
     },
     locationSection: {
       categoryLabel: 'JOYLASHUV VA TRANSPORT',
-      addressTitle: 'Aniq Manzil',
+      addressTitle: 'Aniq manzil',
       addressDesc: 'Olmazor tumani, Umid 1-tor ko‘chasi, 22/4-uy (TTPU ro‘parasi)',
       transportTitle: 'Transport va Metro',
       transportDesc: 'Metro bekatigacha 10 daqiqalik yo‘l, avtobus bekatlari bevosita bino ro‘parasida',
@@ -341,7 +343,7 @@ export const HERO_CONTENT: Record<'UZ' | 'RU' | 'EN', LandingTranslations> = {
       applyShort: 'Заявка',
       languageLabel: 'Язык:',
     },
-    location: "Алмазарский р-н, ул. Умид 1-проезд, 22/4 (напротив ТТПУ)",
+    location: "Алмазарский р-н, 1-й проезд Умид, 22/4 (напротив ТТПУ)",
     locationUrl: 'https://maps.app.goo.gl/2UHJLtbhpgT9tqwn9',
     headlinePrefix: 'Добро пожаловать в',
     headlineHighlight: 'Royal Campus',
@@ -365,28 +367,30 @@ export const HERO_CONTENT: Record<'UZ' | 'RU' | 'EN', LandingTranslations> = {
     },
     statusSearch: {
       title: 'Проверка статуса заявки',
-      desc: 'Узнайте текущий статус по ID заявки или номеру паспорта.',
-      placeholder: 'ID заявки или номер паспорта',
+      desc: 'Узнайте текущий статус по ID заявки, номеру паспорта или телефону.',
+      placeholder: 'ID заявки (RC-2026-...), паспорт или телефон',
       btn: 'Проверить статус →',
       coursePrefix: '',
       courseSuffix: '-курс',
       notFoundQuery: '— заявка не найдена',
-      notFoundDesc: 'Пожалуйста, проверьте введённый ID или номер паспорта и попробуйте снова, либо подайте новую заявку.',
+      notFoundDesc: 'Пожалуйста, проверьте введённый ID, паспорт или номер телефона и попробуйте снова, либо подайте новую заявку.',
       newApplicationBtn: 'Подать новую заявку',
+      activateCabinetBtn: 'Войти / активировать личный кабинет',
+      assignedBedPrefix: 'место:',
       statuses: {
         approved: 'Одобрено',
         under_review: 'На рассмотрении',
-        new: 'Принято (В очереди)',
+        new: 'В ожидании (В очереди)',
         correction_requested: 'Требуется уточнение',
         rejected: 'Отклонено',
       },
       guidance: {
         approvedTitle: 'Поздравляем! Ваша заявка одобрена администрацией.',
         approvedRoomPrefix: 'Вам выделена комната',
-        approvedRoomSuffix: '. Пожалуйста, обратитесь в администрацию (кабинет 101) для заключения договора и получения ключей.',
+        approvedRoomSuffix: 'Комната выделена. Войдите в личный кабинет, чтобы просмотреть договор и график платежей.',
         underReviewTitle: 'Ваши документы в настоящее время рассматриваются комиссией.',
         underReviewDesc: 'Срок рассмотрения: 24–48 часов. Уведомление поступит по SMS или Telegram.',
-        newTitle: 'Заявка успешно зарегистрирована и поставлена в очередь.',
+        newTitle: 'Заявка успешно зарегистрирована и ожидает рассмотрения.',
         newDatePrefix: 'Дата подачи:',
         correctionTitle: 'В поданных документах требуются исправления:',
         correctionFallback: 'Пожалуйста, обновите копию паспорта или справку с места учебы.',
@@ -401,8 +405,6 @@ export const HERO_CONTENT: Record<'UZ' | 'RU' | 'EN', LandingTranslations> = {
       monthSuffixLower: '/ в месяц',
       subPriceInfo: 'Коммунальные услуги и Wi-Fi включены',
       popularBadge: 'САМЫЙ ПОПУЛЯРНЫЙ ВЫБОР ★',
-      panoramicBadge: 'ПАНОРАМНЫЙ',
-      panoramicBullet: 'Широкие панорамные окна',
       viewDetails: 'Подробнее',
       closeDetails: 'Закрыть',
       monthlyRateLabel: 'Ежемесячный тариф',
@@ -415,11 +417,11 @@ export const HERO_CONTENT: Record<'UZ' | 'RU' | 'EN', LandingTranslations> = {
         comfort_plus: '6-местный',
       },
       buttonTexts: {
-        standard: 'ПОДАТЬ ЗАЯВКУ НА STANDARD',
-        comfort: 'ПОДАТЬ ЗАЯВКУ НА COMFORT',
-        lux: 'ПОДАТЬ ЗАЯВКУ НА LUX',
-        standard_plus: 'ПОДАТЬ ЗАЯВКУ НА STANDARD PLUS',
-        comfort_plus: 'ПОДАТЬ ЗАЯВКУ НА COMFORT PLUS',
+        standard: 'Подать заявку на Standard',
+        comfort: 'Подать заявку на Comfort',
+        lux: 'Подать заявку на Lux',
+        standard_plus: 'Подать заявку на Standard plus',
+        comfort_plus: 'Подать заявку на Comfort plus',
       },
       features: [
         'Индивидуальный шкаф и учебный стол',
@@ -443,7 +445,7 @@ export const HERO_CONTENT: Record<'UZ' | 'RU' | 'EN', LandingTranslations> = {
     locationSection: {
       categoryLabel: 'РАСПОЛОЖЕНИЕ И ТРАНСПОРТ',
       addressTitle: 'Точный адрес',
-      addressDesc: 'Алмазарский р-н, ул. Умид 1-проезд, 22/4 (напротив ТТПУ)',
+      addressDesc: 'Алмазарский р-н, 1-й проезд Умид, 22/4 (напротив ТТПУ)',
       transportTitle: 'Транспорт и метро',
       transportDesc: '10 минут пешком до метро, автобусные остановки прямо перед зданием',
       universitiesTitle: 'Университеты поблизости',
@@ -456,7 +458,7 @@ export const HERO_CONTENT: Record<'UZ' | 'RU' | 'EN', LandingTranslations> = {
       ],
       openMapsBtn: 'Открыть в Google Картах',
       mapOverlayTitle: 'Royal Campus Residence',
-      mapOverlaySubtitle: 'Алмазарский р-н · 1-й тупик Умид, 22/4',
+      mapOverlaySubtitle: 'Алмазарский р-н · 1-й проезд Умид, 22/4',
     },
     finalCtaSection: {
       categoryLabel: 'КОЛИЧЕСТВО МЕСТ ОГРАНИЧЕНО',
@@ -480,7 +482,7 @@ export const HERO_CONTENT: Record<'UZ' | 'RU' | 'EN', LandingTranslations> = {
       phoneHref: 'tel:+998705222050',
       telegramHandle: '@campus707',
       telegramUrl: 'https://t.me/campus707',
-      address: 'Алмазарский район, 1-й тупик Умид, дом 22/4',
+      address: 'Алмазарский район, 1-й проезд Умид, дом 22/4',
       receptionHours: 'Приём: 09:00 → 20:00',
     },
   },
@@ -491,19 +493,19 @@ export const HERO_CONTENT: Record<'UZ' | 'RU' | 'EN', LandingTranslations> = {
       amenities: 'Facilities',
       tracker: 'Application Status',
       contact: 'Contact',
-      login: 'Student Portal',
+      login: 'Resident Cabinet',
       loginShort: 'Login',
       apply: 'Apply Now',
       applyShort: 'Apply',
       languageLabel: 'Language:',
     },
-    location: "Olmazor dist., Umid 1st passage, 22/4 (Opposite TTPU)",
+    location: '22/4 Umid 1st Passage, Olmazor Dist. (Opposite TTPU)',
     locationUrl: 'https://maps.app.goo.gl/2UHJLtbhpgT9tqwn9',
     headlinePrefix: 'Welcome to',
     headlineHighlight: 'Royal Campus',
     headlineSuffix: '',
     exploreRoomsBtn: 'Explore Rooms',
-    transportText: 'Our dormitory is located in Tashkent directly across from Turin Polytechnic University and the Almazar District Hokimiyat. The nearest metro station is a 10-minute walk away, with bus stops right in front of the building for easy access to any part of the city.',
+    transportText: 'Our dormitory is located in Tashkent directly across from Turin Polytechnic University and the Olmazor District Hokimiyat. The nearest metro station is a 10-minute walk away, with bus stops right in front of the building for easy access to any part of the city.',
     phoneText: '+998 (70) 522-20-50',
     utilityBar: {
       callLabel: 'Call:',
@@ -521,28 +523,30 @@ export const HERO_CONTENT: Record<'UZ' | 'RU' | 'EN', LandingTranslations> = {
     },
     statusSearch: {
       title: 'Check Application Status',
-      desc: 'Track your current status using your Application ID or passport number.',
-      placeholder: 'Application ID or passport number',
+      desc: 'Track your current status using your Application ID, passport, or phone number.',
+      placeholder: 'Application ID (RC-2026-...), passport, or phone',
       btn: 'Check Status →',
       coursePrefix: 'Year ',
       courseSuffix: '',
       notFoundQuery: '— application not found',
-      notFoundDesc: 'Please check the entered ID or passport number and try again, or submit a new application.',
+      notFoundDesc: 'Please check the entered ID, passport, or phone number and try again, or submit a new application.',
       newApplicationBtn: 'Submit New Application',
+      activateCabinetBtn: 'Activate / Enter Resident Cabinet',
+      assignedBedPrefix: 'bed:',
       statuses: {
         approved: 'Approved',
         under_review: 'Under Review',
-        new: 'Received (In Queue)',
+        new: 'Pending (In Queue)',
         correction_requested: 'Action Required',
         rejected: 'Declined',
       },
       guidance: {
         approvedTitle: 'Congratulations! Your application has been approved by administration.',
         approvedRoomPrefix: 'You have been allocated room',
-        approvedRoomSuffix: '. Please visit administration (Room 101) to sign the residency agreement and receive your keys.',
+        approvedRoomSuffix: 'Room assigned. Open your Resident Cabinet to view your residency agreement and payment schedule.',
         underReviewTitle: 'Your documents are currently being evaluated by the admissions committee.',
         underReviewDesc: 'Processing timeframe: 24–48 hours. You will be notified via SMS or Telegram.',
-        newTitle: 'Your application has been received and added to the processing queue.',
+        newTitle: 'Your application has been received and is pending review.',
         newDatePrefix: 'Submission date:',
         correctionTitle: 'Additional verification required:',
         correctionFallback: 'Please update your passport scan or official university enrollment certificate.',
@@ -557,8 +561,6 @@ export const HERO_CONTENT: Record<'UZ' | 'RU' | 'EN', LandingTranslations> = {
       monthSuffixLower: '/ month',
       subPriceInfo: 'Utilities & Wi-Fi included',
       popularBadge: 'MOST POPULAR CHOICE ★',
-      panoramicBadge: 'PANORAMIC',
-      panoramicBullet: 'Wide panoramic windows',
       viewDetails: 'View details',
       closeDetails: 'Close',
       monthlyRateLabel: 'Monthly rate',
@@ -571,11 +573,11 @@ export const HERO_CONTENT: Record<'UZ' | 'RU' | 'EN', LandingTranslations> = {
         comfort_plus: '6-bed',
       },
       buttonTexts: {
-        standard: 'APPLY FOR STANDARD',
-        comfort: 'APPLY FOR COMFORT',
-        lux: 'APPLY FOR LUX',
-        standard_plus: 'APPLY FOR STANDARD PLUS',
-        comfort_plus: 'APPLY FOR COMFORT PLUS',
+        standard: 'Apply for Standard',
+        comfort: 'Apply for Comfort',
+        lux: 'Apply for Lux',
+        standard_plus: 'Apply for Standard plus',
+        comfort_plus: 'Apply for Comfort plus',
       },
       features: [
         'Personal wardrobe & study desk',
@@ -599,7 +601,7 @@ export const HERO_CONTENT: Record<'UZ' | 'RU' | 'EN', LandingTranslations> = {
     locationSection: {
       categoryLabel: 'LOCATION AND TRANSPORTATION',
       addressTitle: 'Exact Address',
-      addressDesc: 'Olmazor dist., Umid 1st passage, 22/4 (Opposite TTPU)',
+      addressDesc: '22/4 Umid 1st Passage, Olmazor Dist. (Opposite TTPU)',
       transportTitle: 'Transit & Metro',
       transportDesc: '10-minute walk to metro station, direct bus stops right in front of the building',
       universitiesTitle: 'Nearby Universities',
@@ -612,7 +614,7 @@ export const HERO_CONTENT: Record<'UZ' | 'RU' | 'EN', LandingTranslations> = {
       ],
       openMapsBtn: 'Open in Google Maps',
       mapOverlayTitle: 'Royal Campus Residence',
-      mapOverlaySubtitle: 'Olmazor District · 1st Umid Street, 22/4',
+      mapOverlaySubtitle: 'Olmazor District · 22/4 Umid 1st Passage',
     },
     finalCtaSection: {
       categoryLabel: 'LIMITED SPOTS AVAILABLE',
@@ -653,7 +655,7 @@ export const S00_LandingPage: React.FC<LandingPageProps> = ({
   onLoginClick,
   onGoToLogin,
 }) => {
-  const { settings, applications } = useDorm();
+  const { settings, applications, rooms } = useDorm();
   const { formatCurrency, language, setLanguage } = useI18n();
 
   // Functional currentLang state ('UZ' | 'RU' | 'EN')
@@ -795,18 +797,19 @@ export const S00_LandingPage: React.FC<LandingPageProps> = ({
   const [searchedApp, setSearchedApp] = useState<Application | null | 'not_found'>(null);
   const [trackerHasSearched, setTrackerHasSearched] = useState(false);
 
-  // Handle application search
+  // Handle application search (by Application ID RC-2026-XXXX, Passport, or Phone Number)
   const handleSearchApplication = (e: React.FormEvent) => {
     e.preventDefault();
     const query = trackerQuery.trim().toUpperCase();
     if (!query) return;
 
+    const queryPhoneKey = normalizePhoneKey(trackerQuery);
     setTrackerHasSearched(true);
     const found = applications.find(
       (app) =>
         app.id.toUpperCase() === query ||
         app.passportNumber.toUpperCase() === query ||
-        app.phone.replace(/\s+/g, '') === trackerQuery.replace(/\s+/g, '')
+        (queryPhoneKey.length >= 7 && normalizePhoneKey(app.phone) === queryPhoneKey)
     );
 
     setSearchedApp(found || 'not_found');
@@ -817,7 +820,6 @@ export const S00_LandingPage: React.FC<LandingPageProps> = ({
     id: RoomType;
     title: string;
     image: string;
-    isPanoramic: boolean;
     featured: boolean;
     defaultRate: number;
   }> = [
@@ -825,15 +827,13 @@ export const S00_LandingPage: React.FC<LandingPageProps> = ({
       id: 'standard',
       title: 'Standard',
       image: resolveAssetPath('images/room-standard.jpg'),
-      isPanoramic: false,
       featured: false,
       defaultRate: 1000000,
     },
     {
       id: 'standard_plus',
-      title: 'Standard Plus',
+      title: 'Standard plus',
       image: resolveAssetPath('assets/aistudio/DSC00095_0f4ba2e0.JPG'),
-      isPanoramic: true,
       featured: false,
       defaultRate: 1200000,
     },
@@ -841,15 +841,13 @@ export const S00_LandingPage: React.FC<LandingPageProps> = ({
       id: 'comfort',
       title: 'Comfort',
       image: resolveAssetPath('images/room-comfort.jpg'),
-      isPanoramic: false,
       featured: false,
       defaultRate: 1200000,
     },
     {
       id: 'comfort_plus',
-      title: 'Comfort Plus',
+      title: 'Comfort plus',
       image: resolveAssetPath('assets/aistudio/DSC00093_68cdaf92.JPG'),
-      isPanoramic: true,
       featured: true,
       defaultRate: 1400000,
     },
@@ -857,7 +855,6 @@ export const S00_LandingPage: React.FC<LandingPageProps> = ({
       id: 'lux',
       title: 'Lux',
       image: resolveAssetPath('images/room-luxe.jpg'),
-      isPanoramic: false,
       featured: false,
       defaultRate: 1400000,
     },
@@ -1743,13 +1740,6 @@ export const S00_LandingPage: React.FC<LandingPageProps> = ({
                       <span className="absolute top-2.5 left-2.5 px-2.5 py-0.5 rounded-full bg-[#101C32]/90 backdrop-blur-sm border border-[#C6A15B]/45 text-[11px] font-medium text-[#EAD096] whitespace-nowrap tabular-nums">
                         {t.roomsSection.capacities[room.id]}
                       </span>
-
-                      {/* Top-Right PANORAMALI Pill on Plus Rooms */}
-                      {room.isPanoramic && (
-                        <span className="absolute top-2.5 right-2.5 px-2.5 py-0.5 rounded-full bg-gradient-to-r from-[#C6A15B] to-[#EAD096] text-[#101C32] text-[10px] font-bold uppercase tracking-wider whitespace-nowrap shadow-sm">
-                          {t.roomsSection.panoramicBadge}
-                        </span>
-                      )}
                     </div>
 
                     {/* Header Row: Title Left + Batafsil → Right */}
@@ -1786,16 +1776,6 @@ export const S00_LandingPage: React.FC<LandingPageProps> = ({
                           <span>{feature}</span>
                         </li>
                       ))}
-                      {room.isPanoramic && (
-                        <li
-                          className={`flex items-center gap-2 font-medium leading-snug ${
-                            isLight ? 'text-[#0A101D]' : 'text-[#EAD096]'
-                          }`}
-                        >
-                          <span className="text-[#C6A15B] font-semibold shrink-0 select-none">✓</span>
-                          <span>{t.roomsSection.panoramicBullet}</span>
-                        </li>
-                      )}
                     </ul>
                   </div>
 
@@ -2064,16 +2044,51 @@ export const S00_LandingPage: React.FC<LandingPageProps> = ({
                       }`}
                     >
                       <Sparkles className="w-4 h-4 text-[#C6A15B] shrink-0 mt-0.5" />
-                      <div>
+                      <div className="flex-1 min-w-0">
                         {searchedApp.status === 'approved' && (
                           <div>
                             <p className={`font-semibold ${isLight ? 'text-emerald-700' : 'text-emerald-400'}`}>
                               {t.statusSearch.guidance.approvedTitle}
                             </p>
                             <p className={`mt-1 ${isLight ? 'text-[#475569]' : 'text-slate-400'}`}>
-                              {searchedApp.assignedRoomNumber ? (
-                                <span>{t.statusSearch.guidance.approvedRoomPrefix} <strong className={isLight ? 'text-[#0A101D]' : 'text-white'}>{searchedApp.assignedRoomNumber}</strong></span>
-                              ) : null}
+                              {searchedApp.assignedRoomNumber ? (() => {
+                                const assignedRm = rooms.find(
+                                  (r) => r.roomNumber === searchedApp.assignedRoomNumber
+                                );
+                                const floorPrefix = assignedRm?.floor
+                                  ? currentLang === 'RU'
+                                    ? `${assignedRm.floor}-й этаж · `
+                                    : currentLang === 'EN'
+                                    ? `Floor ${assignedRm.floor} · `
+                                    : `${assignedRm.floor}-qavat · `
+                                  : '';
+                                const capText = assignedRm
+                                  ? ` (${t.roomsSection.capacities[assignedRm.type]})`
+                                  : searchedApp.preferredRoomType
+                                  ? ` (${t.roomsSection.capacities[searchedApp.preferredRoomType]})`
+                                  : '';
+                                const bedVal = searchedApp.assignedBedIdentifier || searchedApp.assignedBedNumber;
+                                const formattedRoomBed = bedVal
+                                  ? currentLang === 'RU'
+                                    ? `${floorPrefix}Комната ${searchedApp.assignedRoomNumber} · Койка ${bedVal}`
+                                    : currentLang === 'EN'
+                                    ? `${floorPrefix}Room ${searchedApp.assignedRoomNumber} · Bed ${bedVal}`
+                                    : `${floorPrefix}${searchedApp.assignedRoomNumber}-xona · ${bedVal}-yotoq`
+                                  : currentLang === 'RU'
+                                  ? `${floorPrefix}Комната ${searchedApp.assignedRoomNumber}`
+                                  : currentLang === 'EN'
+                                  ? `${floorPrefix}Room ${searchedApp.assignedRoomNumber}`
+                                  : `${floorPrefix}${searchedApp.assignedRoomNumber}-xona`;
+                                return (
+                                  <span>
+                                    <strong className={isLight ? 'text-[#0A101D]' : 'text-white'}>
+                                      {formattedRoomBed}
+                                      {capText}
+                                    </strong>
+                                    {' · '}
+                                  </span>
+                                );
+                              })() : null}
                               {t.statusSearch.guidance.approvedRoomSuffix}
                             </p>
                           </div>
@@ -2118,6 +2133,17 @@ export const S00_LandingPage: React.FC<LandingPageProps> = ({
                             </p>
                           </div>
                         )}
+
+                        <div className="mt-3 pt-3 border-t border-slate-200/60 dark:border-slate-800/80 flex flex-wrap items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={handleLogin}
+                            className="px-3.5 py-2 rounded-xl bg-gradient-to-r from-[#E2C275] to-[#C6A15B] text-[#0A101D] font-bold text-xs inline-flex items-center gap-1.5 hover:brightness-105 transition-all cursor-pointer"
+                          >
+                            <LogIn className="w-3.5 h-3.5" />
+                            <span>{t.statusSearch.activateCabinetBtn}</span>
+                          </button>
+                        </div>
                       </div>
                     </div>
                   </div>
@@ -2547,11 +2573,6 @@ export const S00_LandingPage: React.FC<LandingPageProps> = ({
                   <span className="px-3 py-1 rounded-full bg-[#101C32]/90 border border-[#C6A15B]/40 text-xs font-semibold text-[#C6A15B] tabular-nums">
                     {t.roomsSection.capacities[selectedCard.id]}
                   </span>
-                  {selectedCard.isPanoramic && (
-                    <span className="px-2.5 py-1 rounded-full bg-[#C6A15B] text-[#101C32] text-[10px] font-bold uppercase tracking-wider">
-                      {t.roomsSection.panoramicBadge}
-                    </span>
-                  )}
                 </div>
               </div>
 
@@ -2582,12 +2603,6 @@ export const S00_LandingPage: React.FC<LandingPageProps> = ({
                       <span>{feature}</span>
                     </li>
                   ))}
-                  {selectedCard.isPanoramic && (
-                    <li className={`flex items-start gap-2 font-medium ${isLight ? 'text-[#0A101D]' : 'text-[#EAD096]'}`}>
-                      <span className="text-[#C6A15B] font-semibold shrink-0">✓</span>
-                      <span>{t.roomsSection.panoramicBullet}</span>
-                    </li>
-                  )}
                 </ul>
 
                 <div className="flex items-center gap-3 pt-2">

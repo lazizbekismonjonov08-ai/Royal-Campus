@@ -22,16 +22,42 @@ import {
   Layers,
   DoorOpen,
   RotateCcw,
+  Copy,
+  KeyRound,
+  CreditCard,
 } from 'lucide-react';
 import { ModalHeader } from '../components/ModalHeader';
 import { useModalDismiss } from '../hooks/useModalDismiss';
-import { Room, Bed, Student, RoomType, ROOM_TYPE_ORDER, ROOM_TYPE_CAPACITY } from '../types';
+import { PaymentExpiryBadge } from '../components/PaymentExpiryBadge';
+import {
+  Room,
+  Bed,
+  Student,
+  RoomType,
+  ROOM_TYPE_ORDER,
+  ROOM_TYPE_CAPACITY,
+  BILLING_PAYMENT_METHODS,
+  BillingPaymentMethod,
+  InitialBillingSetup,
+} from '../types';
+import {
+  ACADEMIC_BILLING_MONTHS,
+  addDaysToDateStr,
+  ensureDateTimeValue,
+  getCurrentBillingPeriod,
+  getCurrentLocalDateTime,
+  normalizeSelectableMethod,
+  safeAmount,
+  toDateTimeLocalInputValue,
+} from '../utils/billingUtils';
 
 interface AssignModalProps {
   initialStudentId?: string;
+  initialRoomType?: RoomType;
   initialRoomId?: string;
   initialBedId?: string;
   onClose: () => void;
+  onOpenAddPaymentModal?: (studentId: string) => void;
 }
 
 // Helper to normalize Uzbek letters and accents for fuzzy, robust search
@@ -49,12 +75,14 @@ type Step = 1 | 2 | 3 | 4 | 5 | 6;
 
 export const S43_AssignTransferBedModal: React.FC<AssignModalProps> = ({
   initialStudentId,
+  initialRoomType,
   initialRoomId,
   initialBedId,
   onClose,
+  onOpenAddPaymentModal,
 }) => {
   const { students, rooms, settings, role, assignBed, transferBed } = useDorm();
-  const { t, formatCurrency, formatDate } = useI18n();
+  const { t, language, formatCurrency, formatDate } = useI18n();
 
   // Role permissions: Owner, Manager, Receptionist
   const isAuthorized = role === 'owner' || role === 'manager' || role === 'receptionist';
@@ -70,21 +98,44 @@ export const S43_AssignTransferBedModal: React.FC<AssignModalProps> = ({
 
   // Selected entities across steps
   const [selectedStudentId, setSelectedStudentId] = useState<string>(initialStudentId || '');
-  const [selectedRoomType, setSelectedRoomType] = useState<RoomType | ''>('');
+  const [selectedRoomType, setSelectedRoomType] = useState<RoomType | ''>(initialRoomType || '');
   const [selectedFloor, setSelectedFloor] = useState<number | null>(null);
   const [selectedRoomId, setSelectedRoomId] = useState<string>(initialRoomId || '');
   const [selectedBedId, setSelectedBedId] = useState<string>(initialBedId || '');
+  const [step4TierFilter, setStep4TierFilter] = useState<'all' | RoomType>('all');
+
+  // Initial payment & rate setup (for new placements)
+  const [monthlyRateOverrideInput, setMonthlyRateOverrideInput] = useState<string>('');
+  const [initialPeriod, setInitialPeriod] = useState<string>(() => getCurrentBillingPeriod());
+  const [monthStatus, setMonthStatus] = useState<'pending' | 'paid' | 'partial'>('pending');
+  const [monthPartialInput, setMonthPartialInput] = useState<string>('');
+  const [paymentMethod, setPaymentMethod] = useState<BillingPaymentMethod>('cash');
+  const [paymentDate, setPaymentDate] = useState<string>(() => getCurrentLocalDateTime());
+  const [paidUntilDate, setPaidUntilDate] = useState<string>(() =>
+    addDaysToDateStr(getCurrentLocalDateTime(), 30)
+  );
+  const [paidUntilManual, setPaidUntilManual] = useState<boolean>(false);
+  const [paymentNotes, setPaymentNotes] = useState<string>('');
+  const [billingValidationError, setBillingValidationError] = useState<string | null>(null);
 
   // Search input state
   const [searchQuery, setSearchQuery] = useState('');
   const [isSearchFocused, setIsSearchFocused] = useState(false);
 
-  // Success state
+  // Success state & generated credentials
   const [isConfirmed, setIsConfirmed] = useState(false);
+  const [assignedCredentials, setAssignedCredentials] = useState<{
+    tempLogin: string;
+    tempPassword: string;
+    roomNumber: string;
+    bedLabel: string;
+  } | null>(null);
+  const [copiedCred, setCopiedCred] = useState<'login' | 'pass' | null>(null);
 
   // Active step in sequence (1 to 6)
   const [currentStep, setCurrentStep] = useState<Step>(() => {
     if (initialStudentId && initialRoomId && initialBedId) return 6;
+    if (initialStudentId && initialRoomType) return 3; // Approved from application: go straight to Floor (2-5) -> Room (matching tier prioritized) -> Bed
     if (initialStudentId) return 2; // student already selected, go to room type
     return 1;
   });
@@ -205,27 +256,36 @@ export const S43_AssignTransferBedModal: React.FC<AssignModalProps> = ({
     });
   }, [rooms, settings.roomTariffs, t]);
 
+  const requestedTier = initialRoomType || selectedStudent?.roomType || selectedRoomType || undefined;
+
   // 3. Residential Floors (2, 3, 4, 5) availability for Step 3
   // Floor 1 is strictly excluded (reception, kitchen, study, medical, laundry)
   const availableFloorsData = useMemo(() => {
-    if (!selectedRoomType) return [];
     const residentialFloorsList = [2, 3, 4, 5];
+    const targetTier = selectedRoomType || requestedTier;
 
     return residentialFloorsList
       .map((floorNum) => {
         const floorRooms = rooms.filter(
           (r) =>
             r.floor === floorNum &&
-            r.type === selectedRoomType &&
             (!r.status || r.status === 'available') &&
             !r.isClosedForMaintenance
         );
 
         let floorAvailableBeds = 0;
+        let matchingTierBeds = 0;
+        let matchingRoomsCount = 0;
         let floorTotalBeds = 0;
+
         floorRooms.forEach((r) => {
+          const availInRoom = r.beds.filter((b) => b.status === 'available').length;
           floorTotalBeds += r.beds.length;
-          floorAvailableBeds += r.beds.filter((b) => b.status === 'available').length;
+          floorAvailableBeds += availInRoom;
+          if (targetTier && r.type === targetTier) {
+            matchingTierBeds += availInRoom;
+            if (availInRoom > 0) matchingRoomsCount++;
+          }
         });
 
         return {
@@ -233,23 +293,26 @@ export const S43_AssignTransferBedModal: React.FC<AssignModalProps> = ({
           roomsCount: floorRooms.length,
           totalBeds: floorTotalBeds,
           availableBeds: floorAvailableBeds,
+          matchingTierBeds,
+          matchingRoomsCount,
           isAvailable: floorAvailableBeds > 0,
         };
       })
-      .filter((fl) => fl.isAvailable); // Requirement: Only show floors containing rooms of the selected type with at least one available bed
-  }, [rooms, selectedRoomType]);
+      .filter((fl) => fl.isAvailable);
+  }, [rooms, selectedRoomType, requestedTier]);
 
-  // 4. Available Rooms for Step 4
+  // 4. Available Rooms for Step 4 (requested/selected tier prioritized first, with tier filter support)
   const availableRoomsList = useMemo(() => {
-    if (!selectedRoomType || selectedFloor === null) return [];
+    if (selectedFloor === null) return [];
+    const priorityTier = selectedRoomType || requestedTier;
 
     return rooms
       .filter(
         (r) =>
           r.floor === selectedFloor &&
-          r.type === selectedRoomType &&
           (!r.status || r.status === 'available') &&
-          !r.isClosedForMaintenance
+          !r.isClosedForMaintenance &&
+          (step4TierFilter === 'all' || r.type === step4TierFilter)
       )
       .map((room) => {
         const avail = room.beds.filter((b) => b.status === 'available').length;
@@ -258,15 +321,30 @@ export const S43_AssignTransferBedModal: React.FC<AssignModalProps> = ({
           ...room,
           availableBedsCount: avail,
           occupiedBedsCount: occupied,
+          isRequestedTier: Boolean(priorityTier && room.type === priorityTier),
         };
       })
-      .filter((r) => r.availableBedsCount > 0); // Requirement: Only show rooms with at least one available bed
-  }, [rooms, selectedRoomType, selectedFloor]);
+      .filter((r) => r.availableBedsCount > 0)
+      .sort((a, b) => {
+        if (a.isRequestedTier !== b.isRequestedTier) {
+          return a.isRequestedTier ? -1 : 1;
+        }
+        const na = parseInt(a.roomNumber, 10);
+        const nb = parseInt(b.roomNumber, 10);
+        if (!isNaN(na) && !isNaN(nb)) return na - nb;
+        return a.roomNumber.localeCompare(b.roomNumber);
+      });
+  }, [rooms, selectedFloor, selectedRoomType, requestedTier, step4TierFilter]);
 
-  // 5. Available Beds for Step 5
+  // 5. Available Beds for Step 5 (strictly only currently Available beds for assignment)
   const bedsInSelectedRoom = useMemo(() => {
     if (!selectedRoom) return [];
-    return selectedRoom.beds;
+    return selectedRoom.beds.filter((b) => b.status === 'available');
+  }, [selectedRoom]);
+
+  const occupiedBedsInSelectedRoom = useMemo(() => {
+    if (!selectedRoom) return 0;
+    return selectedRoom.beds.filter((b) => b.status !== 'available').length;
   }, [selectedRoom]);
 
   // Handle student selection
@@ -296,6 +374,7 @@ export const S43_AssignTransferBedModal: React.FC<AssignModalProps> = ({
   // Handle floor selection
   const handleSelectFloor = (floor: number) => {
     setSelectedFloor(floor);
+    setStep4TierFilter('all');
     if (selectedFloor !== floor) {
       setSelectedRoomId('');
       setSelectedBedId('');
@@ -306,8 +385,10 @@ export const S43_AssignTransferBedModal: React.FC<AssignModalProps> = ({
   // Handle room selection
   const handleSelectRoom = (room: Room) => {
     setSelectedRoomId(room.id);
+    setSelectedRoomType(room.type);
     if (selectedRoomId !== room.id) {
       setSelectedBedId('');
+      setMonthlyRateOverrideInput('');
     }
     setCurrentStep(5);
   };
@@ -319,20 +400,80 @@ export const S43_AssignTransferBedModal: React.FC<AssignModalProps> = ({
     setCurrentStep(6);
   };
 
+  const defaultRoomTariff = selectedRoom
+    ? settings.roomTariffs?.[selectedRoom.type] ?? selectedRoom.priceMonthly
+    : 0;
+  const parsedOverride =
+    monthlyRateOverrideInput.trim() !== '' ? safeAmount(monthlyRateOverrideInput, 0) : 0;
+  const effectiveMonthlyRate = parsedOverride > 0 ? parsedOverride : defaultRoomTariff;
+  const monthPaidPreview =
+    monthStatus === 'paid'
+      ? effectiveMonthlyRate
+      : monthStatus === 'partial'
+      ? Math.min(effectiveMonthlyRate, safeAmount(monthPartialInput, 0))
+      : 0;
+
   // Final confirmation
-  const handleConfirmAssignment = () => {
+  const handleConfirmAssignment = async () => {
     if (!selectedStudentId || !selectedRoomId || !selectedBedId) return;
+    setBillingValidationError(null);
 
     if (isTransfer) {
       transferBed(selectedStudentId, selectedRoomId, selectedBedId);
-    } else {
-      assignBed(selectedStudentId, selectedRoomId, selectedBedId);
+      setIsConfirmed(true);
+      window.setTimeout(() => {
+        onClose();
+      }, 1200);
+      return;
     }
 
-    setIsConfirmed(true);
-    setTimeout(() => {
-      onClose();
-    }, 1200);
+    if (monthStatus === 'partial') {
+      const mVal = safeAmount(monthPartialInput, 0);
+      if (mVal <= 0 || mVal > effectiveMonthlyRate) {
+        setBillingValidationError(t('students.modal.errPartialAmount'));
+        return;
+      }
+    }
+
+    const normalizedDateTime = ensureDateTimeValue(paymentDate);
+    const resolvedPaidUntil =
+      monthStatus !== 'pending'
+        ? paidUntilDate && /^\d{4}-\d{2}-\d{2}$/.test(paidUntilDate)
+          ? paidUntilDate
+          : addDaysToDateStr(normalizedDateTime, 30)
+        : undefined;
+
+    const initialBilling: InitialBillingSetup = {
+      monthlyRateOverride: parsedOverride > 0 ? parsedOverride : undefined,
+      initialPeriod,
+      monthStatus,
+      monthAmount: monthPaidPreview,
+      paymentMethod,
+      paymentDate: normalizedDateTime,
+      paidUntil: resolvedPaidUntil,
+      notes: paymentNotes.trim() || undefined,
+    };
+
+    const credResult = await assignBed(
+      selectedStudentId,
+      selectedRoomId,
+      selectedBedId,
+      initialBilling
+    );
+    if (credResult) {
+      setAssignedCredentials(credResult);
+      setIsConfirmed(true);
+    } else {
+      setIsConfirmed(true);
+    }
+  };
+
+  const handleCopyCred = (val: string, kind: 'login' | 'pass') => {
+    if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+      navigator.clipboard.writeText(val).catch(() => {});
+    }
+    setCopiedCred(kind);
+    window.setTimeout(() => setCopiedCred(null), 1800);
   };
 
   // Step definitions for stepper
@@ -406,8 +547,8 @@ export const S43_AssignTransferBedModal: React.FC<AssignModalProps> = ({
 
         {/* Success Banner */}
         {isConfirmed ? (
-          <div className="my-auto py-12 px-6 text-center space-y-4">
-            <div className="w-16 h-16 bg-emerald-100 text-emerald-600 rounded-full flex items-center justify-center mx-auto shadow-inner animate-bounce">
+          <div className="my-auto py-8 px-4 sm:px-6 text-center space-y-4 overflow-y-auto">
+            <div className="w-16 h-16 bg-emerald-100 text-emerald-600 rounded-full flex items-center justify-center mx-auto shadow-inner">
               <CheckCircle2 className="w-10 h-10" />
             </div>
             <h3 className="text-xl font-black text-slate-900">
@@ -415,9 +556,86 @@ export const S43_AssignTransferBedModal: React.FC<AssignModalProps> = ({
             </h3>
             <p className="text-slate-600 text-xs max-w-md mx-auto">
               <strong className="text-slate-800">{selectedStudent?.fullName}</strong> —{' '}
-              {selectedRoom?.floor}-{t('common.floor')}, {t('common.room')} {selectedRoom?.roomNumber},{' '}
-              {t('common.bed')} {selectedBed?.bedIdentifier || selectedBed?.bedNumber}
+              {selectedRoom?.floor}-{t('common.floor')} •{' '}
+              {t('student.roomBedFormat', {
+                room: selectedRoom?.roomNumber || '',
+                bed: String(selectedBed?.bedIdentifier || selectedBed?.bedNumber || ''),
+              })}
+              {selectedRoom ? ` (${t('student.capacityBeds', { capacity: selectedRoom.capacity })})` : ''}
             </p>
+
+            {assignedCredentials && (
+              <div className="max-w-md mx-auto p-4 rounded-2xl bg-amber-50/90 border border-amber-200 text-left space-y-3">
+                <div className="font-bold text-[#101C32] text-xs flex items-center gap-1.5">
+                  <KeyRound className="w-4 h-4 text-[#C6A15B]" />
+                  <span>{t('applications.tempCredentialsTitle')}</span>
+                </div>
+
+                <div className="space-y-2">
+                  <div className="bg-white p-2.5 rounded-xl border border-amber-200 flex items-center justify-between gap-2">
+                    <div className="min-w-0">
+                      <div className="text-[10px] text-slate-500">{t('applications.tempLoginLabel')}</div>
+                      <div className="font-mono font-bold text-slate-900 truncate">
+                        {assignedCredentials.tempLogin}
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => handleCopyCred(assignedCredentials.tempLogin, 'login')}
+                      className="px-2.5 py-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 text-[10px] font-bold inline-flex items-center gap-1 shrink-0 cursor-pointer"
+                    >
+                      {copiedCred === 'login' ? <Check className="w-3 h-3 text-emerald-600" /> : <Copy className="w-3 h-3" />}
+                      <span>{copiedCred === 'login' ? t('applications.copiedLabel') : t('applications.copyCredentials')}</span>
+                    </button>
+                  </div>
+
+                  <div className="bg-white p-2.5 rounded-xl border border-amber-200 flex items-center justify-between gap-2">
+                    <div className="min-w-0">
+                      <div className="text-[10px] text-slate-500">{t('applications.tempPasswordLabel')}</div>
+                      <div className="font-mono text-sm font-black tracking-wider text-[#101C32]">
+                        {assignedCredentials.tempPassword}
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => handleCopyCred(assignedCredentials.tempPassword, 'pass')}
+                      className="px-2.5 py-1.5 rounded-lg bg-[#101C32] hover:bg-[#1A2D4F] text-[#EAD096] text-[10px] font-bold inline-flex items-center gap-1 shrink-0 cursor-pointer"
+                    >
+                      {copiedCred === 'pass' ? <Check className="w-3 h-3 text-emerald-400" /> : <Copy className="w-3 h-3" />}
+                      <span>{copiedCred === 'pass' ? t('applications.copiedLabel') : t('applications.copyCredentials')}</span>
+                    </button>
+                  </div>
+                </div>
+
+                <p className="text-[11px] text-amber-900/80 leading-snug">
+                  {t('applications.credentialsNote')}
+                </p>
+              </div>
+            )}
+
+            <div className="pt-2 flex flex-wrap items-center justify-center gap-2.5">
+              {!isTransfer && selectedStudentId && onOpenAddPaymentModal && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    const targetId = selectedStudentId;
+                    onClose();
+                    onOpenAddPaymentModal(targetId);
+                  }}
+                  className="px-5 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs shadow-sm transition-colors inline-flex items-center gap-1.5 cursor-pointer"
+                >
+                  <CreditCard className="w-4 h-4" />
+                  <span>{t('students.modal.recordPaymentNow')}</span>
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={handleDismiss}
+                className="px-6 py-2.5 rounded-xl bg-[#101C32] hover:bg-[#1A2D4F] text-[#EAD096] font-bold text-xs shadow-sm transition-colors cursor-pointer"
+              >
+                {t('assign.doneBtn')}
+              </button>
+            </div>
           </div>
         ) : (
           <div className="flex-1 flex flex-col overflow-hidden">
@@ -472,8 +690,8 @@ export const S43_AssignTransferBedModal: React.FC<AssignModalProps> = ({
                       </div>
                       <div className="text-[11px] text-slate-500">
                         {mode === 'new'
-                          ? t('assign.unassignedStatus') + ' (yangi talabalar)'
-                          : t('assign.currentlyAssigned') + ' (o‘rinni ko‘chirish)'}
+                          ? `${t('assign.unassignedStatus')} (${t('assign.newStudentsHint')})`
+                          : `${t('assign.currentlyAssigned')} (${t('assign.transferHint')})`}
                       </div>
                     </div>
 
@@ -521,7 +739,7 @@ export const S43_AssignTransferBedModal: React.FC<AssignModalProps> = ({
                       value={searchQuery}
                       onChange={(e) => setSearchQuery(e.target.value)}
                       onFocus={() => setIsSearchFocused(true)}
-                      placeholder="Talabaning ismi yoki familiyasini kiriting..."
+                      placeholder={t('assign.searchStudentPlaceholder')}
                       className="w-full pl-10 pr-10 py-3 bg-white border-2 border-slate-200 rounded-2xl text-xs font-medium text-slate-800 placeholder-slate-400 focus:outline-none focus:border-[#C6A15B] focus:ring-2 focus:ring-[#C6A15B]/20 shadow-xs transition-all"
                     />
                     {searchQuery && (
@@ -605,12 +823,12 @@ export const S43_AssignTransferBedModal: React.FC<AssignModalProps> = ({
                     <div className="flex items-center justify-between text-[11px] text-slate-500 font-bold px-1">
                       <span>
                         {mode === 'new'
-                          ? `Biriktirilmagan talabalar (${filteredStudents.length})`
-                          : `Mavjud rezidentlar (${filteredStudents.length})`}
+                          ? t('assign.unassignedCount', { count: filteredStudents.length })
+                          : t('assign.activeResidentsCount', { count: filteredStudents.length })}
                       </span>
                       {searchQuery && (
                         <span className="text-slate-400 font-normal">
-                          "{searchQuery}" bo‘yicha qidiruv natijalari
+                          {t('assign.searchQueryResults', { query: searchQuery })}
                         </span>
                       )}
                     </div>
@@ -675,7 +893,7 @@ export const S43_AssignTransferBedModal: React.FC<AssignModalProps> = ({
                               <div className="shrink-0 text-right">
                                 {std.roomNumber ? (
                                   <span className="text-[10px] font-bold text-amber-800 bg-amber-50 px-2 py-0.5 rounded-full border border-amber-200">
-                                    Xona {std.roomNumber} ({std.bedIdentifier || std.bedNumber})
+                                    {t('common.room')} {std.roomNumber} ({std.bedIdentifier || std.bedNumber})
                                   </span>
                                 ) : (
                                   <span className="text-[10px] font-bold text-emerald-800 bg-emerald-50 px-2 py-0.5 rounded-full border border-emerald-200">
@@ -702,7 +920,7 @@ export const S43_AssignTransferBedModal: React.FC<AssignModalProps> = ({
                     {selectedStudent && (
                       <div className="text-[11px] text-slate-600 mt-1 flex items-center gap-1.5">
                         <User className="w-3.5 h-3.5 text-[#C6A15B]" />
-                        <span>Talaba: <strong>{selectedStudent.fullName}</strong></span>
+                        <span>{t('assign.studentLabel')}: <strong>{selectedStudent.fullName}</strong></span>
                       </div>
                     )}
                   </div>
@@ -760,17 +978,22 @@ export const S43_AssignTransferBedModal: React.FC<AssignModalProps> = ({
                                 }`}
                               >
                                 {hasAvailableBeds
-                                  ? `${item.availableBeds} ta bo‘sh`
-                                  : 'Joylar to‘lgan'}
+                                  ? t('assign.availableBedsCount', { count: item.availableBeds })
+                                  : t('assign.fullLabel')}
                               </span>
                             </div>
 
                             <h4
-                              className={`text-sm font-black uppercase tracking-wide ${
+                              className={`text-sm font-black tracking-wide flex items-center gap-1.5 flex-wrap ${
                                 isSelected ? 'text-white' : 'text-slate-900'
                               }`}
                             >
-                              {item.label}
+                              <span>{item.label}</span>
+                              {((initialRoomType || selectedStudent?.roomType) === item.type) && (
+                                <span className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-sky-100 text-sky-800 normal-case tracking-normal">
+                                  {t('assign.requestedTierBadge')}
+                                </span>
+                              )}
                             </h4>
                             <p
                               className={`text-[11px] mt-0.5 ${
@@ -802,17 +1025,34 @@ export const S43_AssignTransferBedModal: React.FC<AssignModalProps> = ({
               {/* STEP 3: SELECT FLOOR */}
               {currentStep === 3 && (
                 <div className="space-y-4">
-                  <div className="bg-slate-50 p-3 rounded-2xl border border-slate-200">
-                    <div className="font-extrabold text-slate-900 text-xs">
-                      {t('assign.step3')}: {t('assign.selectFloorDesc')}
+                  <div className="bg-slate-50 p-3 rounded-2xl border border-slate-200 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                    <div>
+                      <div className="font-extrabold text-slate-900 text-xs">
+                        {t('assign.step3')}: {t('assign.selectFloorDesc')}
+                      </div>
+                      <div className="text-[11px] text-slate-500 mt-1 flex items-center flex-wrap gap-1.5">
+                        {selectedStudent && (
+                          <span>
+                            <strong className="text-slate-800">{selectedStudent.fullName}</strong> •
+                          </span>
+                        )}
+                        {(selectedRoomType || requestedTier) && (
+                          <span>
+                            {t('assign.requestedTierBadge')}:{' '}
+                            <strong className="text-[#101C32]">
+                              {t(`rooms.${selectedRoomType || requestedTier}`)}
+                            </strong>
+                          </span>
+                        )}
+                      </div>
                     </div>
-                    <div className="text-[11px] text-slate-500 mt-1">
-                      Tanlangan xona turi:{' '}
-                      <strong className="text-slate-800 uppercase">
-                        {selectedRoomType ? t(`rooms.${selectedRoomType}`) : ''}
-                      </strong>{' '}
-                      (1-qavat umumiy foydalanish hududi bo‘lgani uchun ro‘yxatga kiritilmaydi)
-                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setCurrentStep(2)}
+                      className="px-3 py-1.5 rounded-xl bg-white hover:bg-slate-100 border border-slate-200 text-slate-700 font-bold text-[11px] shrink-0 cursor-pointer"
+                    >
+                      {t('assign.stepChangeTier')}
+                    </button>
                   </div>
 
                   {availableFloorsData.length === 0 ? (
@@ -824,9 +1064,9 @@ export const S43_AssignTransferBedModal: React.FC<AssignModalProps> = ({
                       <button
                         type="button"
                         onClick={() => setCurrentStep(2)}
-                        className="px-3 py-1.5 bg-amber-200 hover:bg-amber-300 text-amber-900 font-bold rounded-xl text-xs"
+                        className="px-3 py-1.5 bg-amber-200 hover:bg-amber-300 text-amber-900 font-bold rounded-xl text-xs cursor-pointer"
                       >
-                        {t('assign.back')} va boshqa xona turini tanlang
+                        {t('assign.back')}
                       </button>
                     </div>
                   ) : (
@@ -866,20 +1106,33 @@ export const S43_AssignTransferBedModal: React.FC<AssignModalProps> = ({
                                     isSelected ? 'text-slate-300' : 'text-slate-500'
                                   }`}
                                 >
-                                  {fl.roomsCount} ta xona mavjud
+                                  {t('assign.roomsCount', { count: fl.roomsCount })}
                                 </p>
                               </div>
                             </div>
 
-                            <span
-                              className={`text-[11px] font-bold px-2.5 py-1 rounded-full ${
-                                isSelected
-                                  ? 'bg-white/20 text-[#C6A15B]'
-                                  : 'bg-emerald-100 text-emerald-800'
-                              }`}
-                            >
-                              {fl.availableBeds} ta bo‘sh o‘rin
-                            </span>
+                            <div className="text-right space-y-1">
+                              <span
+                                className={`text-[11px] font-bold px-2.5 py-1 rounded-full block ${
+                                  isSelected
+                                    ? 'bg-white/20 text-[#C6A15B]'
+                                    : 'bg-emerald-100 text-emerald-800'
+                                }`}
+                              >
+                                {t('assign.availableBedsCount', { count: fl.availableBeds })}
+                              </span>
+                              {(selectedRoomType || requestedTier) && fl.matchingTierBeds > 0 && (
+                                <span
+                                  className={`text-[10px] font-bold px-2 py-0.5 rounded-full inline-block ${
+                                    isSelected
+                                      ? 'bg-[#C6A15B]/25 text-[#EAD096]'
+                                      : 'bg-sky-100 text-sky-800'
+                                  }`}
+                                >
+                                  {t(`rooms.${selectedRoomType || requestedTier}`)}: {fl.matchingTierBeds}
+                                </span>
+                              )}
+                            </div>
                           </div>
                         );
                       })}
@@ -891,15 +1144,54 @@ export const S43_AssignTransferBedModal: React.FC<AssignModalProps> = ({
               {/* STEP 4: SELECT ROOM */}
               {currentStep === 4 && (
                 <div className="space-y-4">
-                  <div className="bg-slate-50 p-3 rounded-2xl border border-slate-200">
-                    <div className="font-extrabold text-slate-900 text-xs">
-                      {t('assign.step4')}: {t('assign.selectRoomDesc')}
+                  <div className="bg-slate-50 p-3 rounded-2xl border border-slate-200 space-y-2.5">
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                      <div>
+                        <div className="font-extrabold text-slate-900 text-xs">
+                          {t('assign.step4')}: {t('assign.selectRoomDesc')}
+                        </div>
+                        <div className="text-[11px] text-slate-500 mt-0.5">
+                          {selectedFloor}-{t('common.floor')}
+                          {(selectedRoomType || requestedTier) && (
+                            <span>
+                              {' '}• {t('assign.matchingTierFirstNote', {
+                                tier: t(`rooms.${selectedRoomType || requestedTier}`),
+                              })}
+                            </span>
+                          )}
+                        </div>
+                      </div>
                     </div>
-                    <div className="text-[11px] text-slate-500 mt-1">
-                      {selectedFloor}-{t('common.floor')} •{' '}
-                      <span className="uppercase font-bold">
-                        {selectedRoomType ? t(`rooms.${selectedRoomType}`) : ''}
-                      </span>
+
+                    {/* Tier Filter Pills on Step 4 */}
+                    <div className="flex items-center gap-1.5 flex-wrap text-[11px] font-bold">
+                      <button
+                        type="button"
+                        onClick={() => setStep4TierFilter('all')}
+                        className={`px-2.5 py-1 rounded-lg border transition-colors cursor-pointer ${
+                          step4TierFilter === 'all'
+                            ? 'bg-[#101C32] text-[#C6A15B] border-[#101C32]'
+                            : 'bg-white text-slate-600 border-slate-200 hover:border-slate-300'
+                        }`}
+                      >
+                        {t('assign.allAvailableRooms')}
+                      </button>
+                      {ROOM_TYPE_ORDER.map((tier) => (
+                        <button
+                          key={tier}
+                          type="button"
+                          onClick={() => setStep4TierFilter(tier)}
+                          className={`px-2.5 py-1 rounded-lg border transition-colors cursor-pointer ${
+                            step4TierFilter === tier
+                              ? 'bg-[#101C32] text-[#C6A15B] border-[#101C32]'
+                              : requestedTier === tier
+                              ? 'bg-sky-50 text-sky-800 border-sky-200 hover:border-sky-300'
+                              : 'bg-white text-slate-600 border-slate-200 hover:border-slate-300'
+                          }`}
+                        >
+                          {t(`rooms.${tier}`)}
+                        </button>
+                      ))}
                     </div>
                   </div>
 
@@ -909,13 +1201,24 @@ export const S43_AssignTransferBedModal: React.FC<AssignModalProps> = ({
                       <div className="font-bold text-amber-900 text-xs">
                         {t('assign.noAvailableBedsOnFloor')}
                       </div>
-                      <button
-                        type="button"
-                        onClick={() => setCurrentStep(3)}
-                        className="px-3 py-1.5 bg-amber-200 hover:bg-amber-300 text-amber-900 font-bold rounded-xl text-xs"
-                      >
-                        {t('assign.back')} va boshqa qavatni tanlang
-                      </button>
+                      <div className="flex items-center justify-center gap-2">
+                        {step4TierFilter !== 'all' && (
+                          <button
+                            type="button"
+                            onClick={() => setStep4TierFilter('all')}
+                            className="px-3 py-1.5 bg-white hover:bg-slate-100 border border-amber-300 text-amber-900 font-bold rounded-xl text-xs cursor-pointer"
+                          >
+                            {t('assign.allAvailableRooms')}
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          onClick={() => setCurrentStep(3)}
+                          className="px-3 py-1.5 bg-amber-200 hover:bg-amber-300 text-amber-900 font-bold rounded-xl text-xs cursor-pointer"
+                        >
+                          {t('assign.back')}
+                        </button>
+                      </div>
                     </div>
                   ) : (
                     <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3">
@@ -930,6 +1233,8 @@ export const S43_AssignTransferBedModal: React.FC<AssignModalProps> = ({
                             className={`p-3.5 rounded-2xl border-2 transition-all flex flex-col justify-between cursor-pointer ${
                               isSelected
                                 ? 'bg-[#101C32] text-white border-[#C6A15B] shadow-md'
+                                : room.isRequestedTier
+                                ? 'bg-amber-50/35 hover:border-[#C6A15B] border-[#C6A15B]/70 text-slate-800 shadow-2xs'
                                 : 'bg-white hover:border-[#C6A15B] border-slate-200 text-slate-800 shadow-2xs'
                             }`}
                           >
@@ -949,7 +1254,7 @@ export const S43_AssignTransferBedModal: React.FC<AssignModalProps> = ({
                                       : 'bg-emerald-100 text-emerald-800'
                                   }`}
                                 >
-                                  {room.availableBedsCount} bo‘sh
+                                  {t('assign.availableBedsCount', { count: room.availableBedsCount })}
                                 </span>
                               </div>
                               <div className="flex items-center flex-wrap gap-1.5 mb-1">
@@ -965,6 +1270,17 @@ export const S43_AssignTransferBedModal: React.FC<AssignModalProps> = ({
                                   {room.type.endsWith('_plus') && <Sparkles className="w-2.5 h-2.5" />}
                                   {t(`rooms.${room.type}`)}
                                 </span>
+                                {room.isRequestedTier && (
+                                  <span
+                                    className={`text-[9px] font-bold px-1.5 py-0.5 rounded ${
+                                      isSelected
+                                        ? 'bg-sky-500/30 text-sky-200'
+                                        : 'bg-sky-100 text-sky-800'
+                                    }`}
+                                  >
+                                    {t('assign.requestedTierBadge')}
+                                  </span>
+                                )}
                                 <span
                                   className={`text-[10px] font-mono font-bold ${
                                     isSelected ? 'text-[#EAD096]' : 'text-slate-700'
@@ -978,24 +1294,29 @@ export const S43_AssignTransferBedModal: React.FC<AssignModalProps> = ({
                                   isSelected ? 'text-slate-300' : 'text-slate-500'
                                 }`}
                               >
-                                Sig‘im: {room.capacity} kishilik ({room.occupiedBedsCount} band)
+                                {t('assign.capacityLabel', {
+                                  capacity: room.capacity,
+                                  occupied: room.occupiedBedsCount,
+                                })}
                               </p>
                             </div>
 
-                            {/* Mini bed indicator dots */}
-                            <div className="mt-3 pt-2 border-t border-slate-200/40 flex items-center gap-1.5">
+                            {/* Numbered bed badges */}
+                            <div className="mt-3 pt-2 border-t border-slate-200/40 flex items-center flex-wrap gap-1">
                               {room.beds.map((b) => (
                                 <span
                                   key={b.id}
-                                  title={`O‘rin ${b.bedIdentifier || b.bedNumber}: ${b.status}`}
-                                  className={`w-3 h-3 rounded-full border ${
+                                  title={`${t('common.bed')} ${b.bedIdentifier || b.bedNumber}: ${b.status}`}
+                                  className={`text-[9px] font-mono font-bold px-1.5 py-0.5 rounded border ${
                                     b.status === 'available'
-                                      ? 'bg-emerald-500 border-emerald-600'
+                                      ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
                                       : b.status === 'occupied'
-                                      ? 'bg-slate-300 border-slate-400'
-                                      : 'bg-amber-400 border-amber-500'
+                                      ? 'bg-slate-100 text-slate-500 border-slate-300 line-through'
+                                      : 'bg-amber-50 text-amber-700 border-amber-200'
                                   }`}
-                                />
+                                >
+                                  {b.bedIdentifier || b.bedNumber}
+                                </span>
                               ))}
                             </div>
                           </div>
@@ -1006,84 +1327,95 @@ export const S43_AssignTransferBedModal: React.FC<AssignModalProps> = ({
                 </div>
               )}
 
-              {/* STEP 5: SELECT BED */}
+              {/* STEP 5: SELECT BED (Only Available Beds Listed) */}
               {currentStep === 5 && (
                 <div className="space-y-4">
-                  <div className="bg-slate-50 p-3 rounded-2xl border border-slate-200">
-                    <div className="font-extrabold text-slate-900 text-xs">
-                      {t('assign.step5')}: {t('assign.selectBedDesc')}
-                    </div>
-                    {selectedRoom && (
-                      <div className="text-[11px] text-slate-500 mt-1">
-                        {selectedRoom.floor}-{t('common.floor')} • {t('common.room')}{' '}
-                        <strong>{selectedRoom.roomNumber}</strong> ({t(`rooms.${selectedRoom.type}`)})
+                  <div className="bg-slate-50 p-3 rounded-2xl border border-slate-200 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                    <div>
+                      <div className="font-extrabold text-slate-900 text-xs">
+                        {t('assign.step5')}: {t('assign.selectBedDesc')}
                       </div>
-                    )}
-                  </div>
-
-                  <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3">
-                    {bedsInSelectedRoom.map((b) => {
-                      const isSelected = selectedBedId === b.id;
-                      const isAvailable = b.status === 'available';
-                      const bedLabel = b.bedIdentifier || String(b.bedNumber);
-
-                      return (
-                        <div
-                          key={b.id}
-                          onClick={() => {
-                            if (isAvailable) handleSelectBed(b);
-                          }}
-                          className={`p-3.5 rounded-2xl border-2 transition-all flex flex-col justify-between text-center ${
-                            isSelected
-                              ? 'bg-[#101C32] text-white border-[#C6A15B] shadow-md ring-2 ring-[#C6A15B]/30'
-                              : isAvailable
-                              ? 'bg-emerald-50/70 hover:bg-emerald-100/70 border-emerald-300 text-emerald-900 cursor-pointer shadow-2xs'
-                              : 'bg-slate-100 border-slate-200 text-slate-400 opacity-70 cursor-not-allowed'
-                          }`}
-                        >
-                          <div>
-                            <div className="w-8 h-8 rounded-xl mx-auto mb-2 flex items-center justify-center font-black text-xs">
-                              <BedDouble
-                                className={`w-5 h-5 ${
-                                  isSelected
-                                    ? 'text-[#C6A15B]'
-                                    : isAvailable
-                                    ? 'text-emerald-700'
-                                    : 'text-slate-400'
-                                }`}
-                              />
-                            </div>
-                            <div
-                              className={`font-mono font-black text-sm ${
-                                isSelected ? 'text-white' : isAvailable ? 'text-slate-900' : 'text-slate-500'
-                              }`}
-                            >
-                              {t('common.bed')} {bedLabel}
-                            </div>
-                          </div>
-
-                          <div className="mt-3 pt-2 border-t border-slate-200/50">
-                            {isSelected ? (
-                              <span className="text-[10px] font-bold text-[#C6A15B] flex items-center justify-center gap-1">
-                                <Check className="w-3 h-3" /> Tanlandi
-                              </span>
-                            ) : isAvailable ? (
-                              <span className="text-[10px] font-bold text-emerald-700">
-                                {t('beds.available')}
-                              </span>
-                            ) : (
-                              <span
-                                className="text-[10px] font-medium text-slate-500 truncate block"
-                                title={b.studentName || 'Band'}
-                              >
-                                {b.studentName ? b.studentName.split(' ')[0] : 'Band'}
-                              </span>
-                            )}
-                          </div>
+                      {selectedRoom && (
+                        <div className="text-[11px] text-slate-500 mt-1">
+                          {selectedRoom.floor}-{t('common.floor')} • {t('common.room')}{' '}
+                          <strong>{selectedRoom.roomNumber}</strong> ({t(`rooms.${selectedRoom.type}`)} ·{' '}
+                          {t('student.capacityBeds', { capacity: selectedRoom.capacity })})
                         </div>
-                      );
-                    })}
+                      )}
+                    </div>
+                    <div className="text-[11px] text-emerald-700 font-semibold">
+                      {t('rooms.onlyAvailableBeds')}
+                      {occupiedBedsInSelectedRoom > 0 && (
+                        <span className="text-slate-500 font-normal ml-1">
+                          ({t('rooms.occupiedCountNote', { occupied: occupiedBedsInSelectedRoom })})
+                        </span>
+                      )}
+                    </div>
                   </div>
+
+                  {bedsInSelectedRoom.length === 0 ? (
+                    <div className="p-8 bg-amber-50 border border-amber-200 rounded-2xl text-center space-y-2">
+                      <AlertCircle className="w-8 h-8 text-amber-600 mx-auto" />
+                      <div className="font-bold text-amber-900 text-xs">
+                        {t('assign.noAvailableBedsOnFloor')}
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setCurrentStep(4)}
+                        className="px-3 py-1.5 bg-amber-200 hover:bg-amber-300 text-amber-900 font-bold rounded-xl text-xs cursor-pointer"
+                      >
+                        {t('assign.back')}
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3">
+                      {bedsInSelectedRoom.map((b) => {
+                        const isSelected = selectedBedId === b.id;
+                        const bedLabel = b.bedIdentifier || String(b.bedNumber);
+
+                        return (
+                          <div
+                            key={b.id}
+                            onClick={() => handleSelectBed(b)}
+                            className={`p-3.5 rounded-2xl border-2 transition-all flex flex-col justify-between text-center cursor-pointer ${
+                              isSelected
+                                ? 'bg-[#101C32] text-white border-[#C6A15B] shadow-md ring-2 ring-[#C6A15B]/30'
+                                : 'bg-emerald-50/70 hover:bg-emerald-100/70 border-emerald-300 text-emerald-900 shadow-2xs'
+                            }`}
+                          >
+                            <div>
+                              <div className="w-8 h-8 rounded-xl mx-auto mb-2 flex items-center justify-center font-black text-xs">
+                                <BedDouble
+                                  className={`w-5 h-5 ${
+                                    isSelected ? 'text-[#C6A15B]' : 'text-emerald-700'
+                                  }`}
+                                />
+                              </div>
+                              <div
+                                className={`font-mono font-black text-sm ${
+                                  isSelected ? 'text-white' : 'text-slate-900'
+                                }`}
+                              >
+                                {t('common.bed')} {bedLabel}
+                              </div>
+                            </div>
+
+                            <div className="mt-3 pt-2 border-t border-slate-200/50">
+                              {isSelected ? (
+                                <span className="text-[10px] font-bold text-[#C6A15B] flex items-center justify-center gap-1">
+                                  <Check className="w-3 h-3" /> {t('assign.selectedBadge')}
+                                </span>
+                              ) : (
+                                <span className="text-[10px] font-bold text-emerald-700">
+                                  {t('beds.available')}
+                                </span>
+                              )}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
                 </div>
               )}
 
@@ -1095,7 +1427,7 @@ export const S43_AssignTransferBedModal: React.FC<AssignModalProps> = ({
                       {t('assign.step6')}: {t('assign.reviewSummary')}
                     </div>
                     <div className="text-[11px] text-slate-500 mt-1">
-                      Barcha ma’lumotlar to‘g‘riligini tasdiqlang va o‘ringa biriktiring
+                      {t('assign.reviewChecklistNote')}
                     </div>
                   </div>
 
@@ -1120,9 +1452,9 @@ export const S43_AssignTransferBedModal: React.FC<AssignModalProps> = ({
                           </span>
                         </div>
                         <div className="text-[11px] text-slate-500 flex flex-wrap gap-x-3 gap-y-0.5 mt-0.5">
-                          <span>Tel: {selectedStudent?.phone}</span>
+                          <span>{t('common.phone')}: {selectedStudent?.phone}</span>
                           <span>•</span>
-                          <span>Pasport: {selectedStudent?.passportNumber}</span>
+                          <span>{t('app.passport')}: {selectedStudent?.passportNumber}</span>
                           <span>•</span>
                           <span>{selectedStudent?.university}</span>
                         </div>
@@ -1138,7 +1470,7 @@ export const S43_AssignTransferBedModal: React.FC<AssignModalProps> = ({
                             {t('assign.transferFrom')}:
                           </div>
                           <div className="text-amber-800 text-[11px]">
-                            {selectedStudent.floor}-qavat • Xona {selectedStudent.roomNumber} • O‘rin {selectedStudent.bedIdentifier || selectedStudent.bedNumber}
+                            {selectedStudent.floor}-{t('common.floor')} • {t('common.room')} {selectedStudent.roomNumber} • {t('common.bed')} {selectedStudent.bedIdentifier || selectedStudent.bedNumber}
                           </div>
                         </div>
                       </div>
@@ -1148,7 +1480,7 @@ export const S43_AssignTransferBedModal: React.FC<AssignModalProps> = ({
                     <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
                       <div className="p-3 bg-slate-50 rounded-xl border border-slate-200">
                         <div className="text-[10px] text-slate-400 font-bold uppercase">{t('assign.step2')}</div>
-                        <div className="text-xs font-black text-slate-900 uppercase mt-0.5">
+                        <div className="text-xs font-black text-slate-900 mt-0.5">
                           {selectedRoom ? t(`rooms.${selectedRoom.type}`) : ''}
                         </div>
                       </div>
@@ -1165,6 +1497,11 @@ export const S43_AssignTransferBedModal: React.FC<AssignModalProps> = ({
                         <div className="text-xs font-black text-slate-900 mt-0.5">
                           {t('common.room')} {selectedRoom?.roomNumber}
                         </div>
+                        {selectedRoom && (
+                          <div className="text-[10px] text-slate-500 mt-0.5">
+                            {t('student.capacityBeds', { capacity: selectedRoom.capacity })}
+                          </div>
+                        )}
                       </div>
 
                       <div className="p-3 bg-emerald-50 rounded-xl border border-emerald-200">
@@ -1182,7 +1519,7 @@ export const S43_AssignTransferBedModal: React.FC<AssignModalProps> = ({
                           <span>{t('assign.summaryTariff')}:</span>
                           {selectedRoom && (
                             <span
-                              className={`px-1.5 py-0.5 rounded text-[9px] font-extrabold uppercase ${
+                              className={`px-1.5 py-0.5 rounded text-[9px] font-extrabold ${
                                 selectedRoom.type.endsWith('_plus')
                                   ? 'bg-amber-100 text-amber-900 border border-amber-300'
                                   : 'bg-slate-200 text-slate-700'
@@ -1192,21 +1529,249 @@ export const S43_AssignTransferBedModal: React.FC<AssignModalProps> = ({
                             </span>
                           )}
                         </div>
-                        <div className="text-sm font-black text-[#101C32] mt-0.5">
-                          {formatCurrency(
-                            selectedRoom
-                              ? (settings.roomTariffs?.[selectedRoom.type] ?? selectedRoom.priceMonthly)
-                              : 0
-                          )}
+                        <div className="text-sm font-black text-[#101C32] mt-0.5 tabular-nums">
+                          {formatCurrency(effectiveMonthlyRate)}
                           <span className="text-[10px] font-normal text-slate-500"> {t('common.perMonth')}</span>
                         </div>
                       </div>
 
                       <div className="text-right text-[11px] text-slate-500">
-                        <div>Shartnoma muddati: <strong>{formatDate(new Date().toISOString().slice(0, 10))}</strong> — <strong>30.06.2027</strong></div>
-                        <div className="text-[10px] text-slate-400">RC-2026 shartnoma kodi avtomatik shakllantiriladi</div>
+                        <div>{t('assign.contractTermLine')} <strong>{formatDate(new Date().toISOString().slice(0, 10))}</strong> — <strong>30.06.2027</strong></div>
+                        <div className="text-[10px] text-slate-400">{t('assign.autoContractCodeNote')}</div>
                       </div>
                     </div>
+
+                    {/* Initial Billing Configuration (New Placements Only) */}
+                    {!isTransfer && (
+                      <div className="p-3.5 sm:p-4 rounded-2xl border border-[#C6A15B]/40 bg-amber-50/40 space-y-3">
+                        <div className="flex items-start justify-between gap-2 flex-wrap">
+                          <div className="flex items-center gap-2">
+                            <CreditCard className="w-4 h-4 text-[#C6A15B] shrink-0" />
+                            <div>
+                              <div className="text-xs font-extrabold text-[#101C32]">
+                                {t('assign.initialBillingTitle')}
+                              </div>
+                              <div className="text-[11px] text-slate-600">
+                                {t('assign.initialBillingSubtitle')}
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+
+                        {billingValidationError && (
+                          <div className="p-2.5 rounded-xl bg-rose-50 border border-rose-200 text-rose-700 text-[11px] font-semibold flex items-center gap-1.5">
+                            <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+                            <span>{billingValidationError}</span>
+                          </div>
+                        )}
+
+                        {/* Optional Monthly Rate Override */}
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 p-3 rounded-xl bg-white border border-slate-200 items-end">
+                          <div>
+                            <label className="block text-[11px] font-bold text-slate-700 mb-1">
+                              {t('billing.rateOverrideLabel')}
+                            </label>
+                            <input
+                              type="number"
+                              min={0}
+                              step={50000}
+                              value={monthlyRateOverrideInput}
+                              onChange={(e) => setMonthlyRateOverrideInput(e.target.value)}
+                              placeholder={String(defaultRoomTariff)}
+                              className="w-full px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-xs font-bold text-slate-900 tabular-nums focus:outline-none focus:ring-2 focus:ring-[#C6A15B]"
+                            />
+                          </div>
+                          <div className="flex items-center justify-between gap-2">
+                            <div className="text-[11px] text-slate-600">
+                              {t('billing.monthlyRate')}:{' '}
+                              <strong className="text-[#101C32] tabular-nums">
+                                {formatCurrency(effectiveMonthlyRate)}
+                              </strong>
+                            </div>
+                            {parsedOverride > 0 && (
+                              <button
+                                type="button"
+                                onClick={() => setMonthlyRateOverrideInput('')}
+                                className="px-2 py-1 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 text-[10px] font-bold cursor-pointer"
+                              >
+                                {t('billing.resetToRoomRate')}
+                              </button>
+                            )}
+                          </div>
+                        </div>
+
+                        {/* Initial Month Payment */}
+                        <div className="p-3 rounded-xl bg-white border border-slate-200 space-y-2.5">
+                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                            <div>
+                              <label className="block text-[10px] font-bold text-slate-600 mb-1">
+                                {t('students.modal.monthPeriodLabel')}
+                              </label>
+                              <select
+                                value={initialPeriod}
+                                onChange={(e) => setInitialPeriod(e.target.value)}
+                                className="w-full px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-xs font-medium text-slate-800"
+                              >
+                                {ACADEMIC_BILLING_MONTHS.map((m) => (
+                                  <option key={m.period} value={m.period}>
+                                    {language === 'ru' ? m.ru : language === 'en' ? m.en : m.uz}
+                                  </option>
+                                ))}
+                              </select>
+                            </div>
+                            <div>
+                              <label className="block text-[10px] font-bold text-slate-600 mb-1">
+                                {t('students.modal.initialMonthLabel')} ({formatCurrency(effectiveMonthlyRate)})
+                              </label>
+                              <div className="flex items-center gap-1">
+                                {(['pending', 'paid', 'partial'] as const).map((st) => (
+                                  <button
+                                    key={st}
+                                    type="button"
+                                    onClick={() => {
+                                      setMonthStatus(st);
+                                      setBillingValidationError(null);
+                                      if (st === 'partial' && !monthPartialInput) {
+                                        setMonthPartialInput(
+                                          String(Math.round(effectiveMonthlyRate / 2))
+                                        );
+                                      }
+                                    }}
+                                    className={`flex-1 px-2 py-1.5 rounded-lg text-[10px] font-bold border transition-colors cursor-pointer ${
+                                      monthStatus === st
+                                        ? st === 'paid'
+                                          ? 'bg-emerald-600 text-white border-emerald-600'
+                                          : st === 'partial'
+                                          ? 'bg-amber-500 text-white border-amber-500'
+                                          : 'bg-slate-800 text-white border-slate-800'
+                                        : 'bg-slate-50 text-slate-600 border-slate-200 hover:bg-slate-100'
+                                    }`}
+                                  >
+                                    {t(`billing.status.${st}`)}
+                                  </button>
+                                ))}
+                              </div>
+                            </div>
+                          </div>
+
+                          {monthStatus === 'partial' && (
+                            <div>
+                              <label className="block text-[10px] font-semibold text-slate-600 mb-1">
+                                {t('students.modal.partialAmountLabel')}
+                              </label>
+                              <input
+                                type="number"
+                                min={1}
+                                max={effectiveMonthlyRate}
+                                step={50000}
+                                value={monthPartialInput}
+                                onChange={(e) => setMonthPartialInput(e.target.value)}
+                                placeholder={String(Math.round(effectiveMonthlyRate / 2))}
+                                className="w-full px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-xs font-bold text-slate-900 tabular-nums"
+                              />
+                            </div>
+                          )}
+                        </div>
+
+                        {monthStatus !== 'pending' && (
+                          <div className="space-y-2.5">
+                            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+                              <div>
+                                <label className="block text-[10px] font-bold text-slate-600 mb-1">
+                                  {t('payments.methodLabel')}
+                                </label>
+                                <select
+                                  value={normalizeSelectableMethod(paymentMethod)}
+                                  onChange={(e) =>
+                                    setPaymentMethod(e.target.value as BillingPaymentMethod)
+                                  }
+                                  className="w-full px-2.5 py-1.5 bg-white border border-slate-200 rounded-lg text-xs text-slate-800"
+                                >
+                                  {BILLING_PAYMENT_METHODS.map((m) => (
+                                    <option key={m} value={m}>
+                                      {t(`payments.method.${m}`)}
+                                    </option>
+                                  ))}
+                                </select>
+                              </div>
+                              <div>
+                                <label className="block text-[10px] font-bold text-slate-600 mb-1">
+                                  {t('payments.dateLabel')}
+                                </label>
+                                <input
+                                  type="datetime-local"
+                                  value={toDateTimeLocalInputValue(paymentDate)}
+                                  onChange={(e) => {
+                                    setPaymentDate(e.target.value);
+                                    if (!paidUntilManual && e.target.value) {
+                                      setPaidUntilDate(addDaysToDateStr(e.target.value, 30));
+                                    }
+                                  }}
+                                  className="w-full px-2.5 py-1.5 bg-white border border-slate-200 rounded-lg text-xs text-slate-800 tabular-nums"
+                                />
+                              </div>
+                              <div>
+                                <label className="block text-[10px] font-bold text-slate-600 mb-1">
+                                  {t('payments.paidUntilLabel')}
+                                </label>
+                                <input
+                                  type="date"
+                                  value={paidUntilDate}
+                                  onChange={(e) => {
+                                    setPaidUntilDate(e.target.value);
+                                    setPaidUntilManual(true);
+                                  }}
+                                  className="w-full px-2.5 py-1.5 bg-white border border-slate-200 rounded-lg text-xs text-slate-800 tabular-nums"
+                                />
+                              </div>
+                            </div>
+
+                            <div className="flex items-center justify-between gap-2 flex-wrap">
+                              <span className="text-[10px] text-slate-500">
+                                {t('payments.paidUntilAutoHint')}
+                              </span>
+                              <PaymentExpiryBadge paidUntilDate={paidUntilDate} compact />
+                            </div>
+
+                            <div>
+                              <label className="block text-[10px] font-bold text-slate-600 mb-1">
+                                {t('payments.notesLabel')}
+                              </label>
+                              <input
+                                type="text"
+                                value={paymentNotes}
+                                onChange={(e) => setPaymentNotes(e.target.value)}
+                                placeholder={t('billing.notePlaceholder')}
+                                className="w-full px-2.5 py-1.5 bg-white border border-slate-200 rounded-lg text-xs text-slate-800"
+                              />
+                            </div>
+                          </div>
+                        )}
+
+                        <div className="flex items-center justify-between gap-2 pt-1 text-[11px]">
+                          <span className="text-slate-600">
+                            {t('students.modal.totalInitialDue')}:{' '}
+                            <strong className="text-emerald-700 tabular-nums">
+                              {formatCurrency(monthPaidPreview)}
+                            </strong>
+                          </span>
+                          <span className="text-slate-600">
+                            {t('students.modal.remainingPreview')}:{' '}
+                            <strong className="text-amber-800 tabular-nums">
+                              {formatCurrency(
+                                Math.max(
+                                  0,
+                                  (initialPeriod <= getCurrentBillingPeriod() ||
+                                  monthStatus !== 'pending'
+                                    ? effectiveMonthlyRate
+                                    : 0) - monthPaidPreview
+                                )
+                              )}
+                            </strong>
+                          </span>
+                        </div>
+                      </div>
+                    )}
                   </div>
                 </div>
               )}

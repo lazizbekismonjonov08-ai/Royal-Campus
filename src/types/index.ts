@@ -95,6 +95,9 @@ export interface Student {
   lastAccessAt?: string;
   lastAccessDirection?: 'entry' | 'exit';
   lastAccessTerminal?: string;
+  applicationId?: string;
+  tempLogin?: string;
+  tempPassword?: string;
 }
 
 export type ApplicationStatus = 'new' | 'under_review' | 'approved' | 'rejected' | 'correction_requested';
@@ -120,20 +123,79 @@ export interface Application {
   reviewedBy?: string;
   assignedRoomNumber?: string;
   assignedBedNumber?: number;
+  assignedBedIdentifier?: string;
   preferredRoomType?: RoomType;
+  monthlyTariff?: number;
+  studentId?: string;
+  tempLogin?: string;
+  tempPassword?: string;
+}
+
+export type BillingPaymentMethod =
+  | 'cash'
+  | 'card'
+  | 'click'
+  | 'payme'
+  | 'bank_transfer'
+  | 'click_payme';
+
+export const BILLING_PAYMENT_METHODS: Array<'cash' | 'card' | 'click' | 'payme' | 'bank_transfer'> = [
+  'cash',
+  'card',
+  'click',
+  'payme',
+  'bank_transfer',
+];
+
+export type BillingEntryStatus = 'paid' | 'partial' | 'pending';
+
+export interface MonthlyBillingEntry {
+  period: string; // YYYY-MM ('2026-09' .. '2027-08')
+  status: BillingEntryStatus;
+  scheduledAmount?: number;
+  paidAmount: number;
+  paymentDate?: string; // YYYY-MM-DDTHH:mm or YYYY-MM-DD
+  paidUntil?: string; // YYYY-MM-DD (coverage end date, defaults to paymentDate + 30 days)
+  paymentMethod?: BillingPaymentMethod;
+  notes?: string;
+  updatedAt?: string;
+}
+
+export interface StudentBillingLedger {
+  studentId: string;
+  monthlyRateOverride?: number;
+  paidUntil?: string; // YYYY-MM-DD active coverage end date
+  months: Record<string, MonthlyBillingEntry>;
+  updatedAt: string;
+}
+
+export interface InitialBillingSetup {
+  monthlyRateOverride?: number;
+  initialPeriod: string;
+  monthStatus: 'pending' | 'paid' | 'partial';
+  monthAmount: number;
+  paymentMethod: BillingPaymentMethod;
+  paymentDate: string; // YYYY-MM-DDTHH:mm or YYYY-MM-DD
+  paidUntil?: string; // YYYY-MM-DD
+  notes?: string;
 }
 
 export interface Payment {
   id: string;
   studentId: string;
   studentName: string;
+  floor?: number;
   roomNumber: string;
+  bedLabel?: string;
   amount: number; // UZS
-  paymentDate: string; // YYYY-MM-DD
+  paymentDate: string; // YYYY-MM-DDTHH:mm or YYYY-MM-DD
+  paymentTime?: string; // HH:MM
   date?: string; // YYYY-MM-DD
+  paidUntil?: string; // YYYY-MM-DD coverage end date
   type?: string; // 'income'
   periodMonth: string; // e.g. "2026-10"
-  paymentMethod: 'cash' | 'card' | 'bank_transfer';
+  itemRemainingAfter?: number; // Remaining balance on that item after this transaction
+  paymentMethod: BillingPaymentMethod;
   recordedBy: string;
   status: 'completed' | 'pending' | 'cancelled';
   notes?: string;
@@ -165,6 +227,16 @@ export interface Employee {
   role: Role;
   status: 'active' | 'disabled';
   lastLogin: string;
+}
+
+export interface StaffUser {
+  id: string;
+  fullName: string;
+  roleTitle: string;
+  login: string;
+  password: string;
+  isActive: boolean;
+  createdAt: string;
 }
 
 export type IssueCategory = 'plumbing' | 'electricity' | 'cleaning' | 'furniture' | 'wifi' | 'other';
@@ -225,9 +297,9 @@ export interface AuditLogEntry {
 
 export interface RoomTariff {
   standard: number;      // e.g. 1,000,000 UZS (8-bed)
-  standard_plus: number; // e.g. 1,200,000 UZS (8-bed Panoramic)
+  standard_plus: number; // e.g. 1,200,000 UZS (8-bed)
   comfort: number;       // e.g. 1,200,000 UZS (6-bed)
-  comfort_plus: number;  // e.g. 1,400,000 UZS (6-bed Panoramic)
+  comfort_plus: number;  // e.g. 1,400,000 UZS (6-bed)
   lux: number;           // e.g. 1,400,000 UZS (4-bed)
 }
 
@@ -398,9 +470,11 @@ export interface MaintenanceAiAnalysisResponse {
 export interface StoredUserAccount {
   id: string;
   identifier: string;
+  login?: string;
   phone: string;
   role: Role;
   studentId?: string;
+  applicationId?: string;
   passwordHash: string;
   passwordSalt: string;
   updatedAt: string;

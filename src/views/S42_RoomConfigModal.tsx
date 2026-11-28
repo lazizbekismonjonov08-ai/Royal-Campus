@@ -415,7 +415,7 @@ export const S42_RoomConfigModal: React.FC<RoomConfigModalProps> = ({
                   {t(`rooms.${roomType}`)} · {TYPE_CAPACITY[roomType]} {t('rooms.bedsTotal')}
                 </div>
                 <div className={`text-[11px] mt-0.5 ${roomType.endsWith('_plus') ? 'text-slate-300' : 'text-slate-500'}`}>
-                  {roomType.endsWith('_plus') ? t('rooms.panoramicBadge') : t('rooms.regular')}
+                  {t('rooms.capacity')}: {t('student.capacityBeds', { capacity: TYPE_CAPACITY[roomType] })}
                 </div>
               </div>
             </div>

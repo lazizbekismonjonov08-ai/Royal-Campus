@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { useDorm } from '../context/DormContext';
 import { useI18n } from '../i18n/I18nContext';
-import { Room, Bed, CommonArea, CommonAreaCategory } from '../types';
+import { Room, Bed, Student, CommonArea, CommonAreaCategory, ROOM_TYPE_ORDER } from '../types';
 import {
   Building,
   Sparkles,
@@ -17,6 +17,8 @@ import {
   Info,
   Coffee,
   AlertTriangle,
+  RotateCcw,
+  CheckCircle2,
 } from 'lucide-react';
 import { ModalHeader } from '../components/ModalHeader';
 import { S42_RoomConfigModal } from './S42_RoomConfigModal';
@@ -28,27 +30,44 @@ interface FloorsProps {
 export const S40_FloorsAndRooms: React.FC<FloorsProps> = ({ onSelectRoom }) => {
   const {
     rooms,
+    students,
     commonAreas,
     addCommonArea,
     updateCommonArea,
     deleteCommonArea,
     canConfigureRooms,
     deleteRoom,
+    resetAllBedsToAvailable,
     role,
     roomFilter,
     setRoomFilter,
   } = useDorm() as any;
-  const { t, formatCurrency, formatNumber } = useI18n();
-  const [selectedFloor, setSelectedFloor] = useState<number>(2);
+  const { t, formatCurrency } = useI18n();
+  // 0 = All residential floors (2-5), 1 = Common Areas, 2-5 = specific floor
+  const [selectedFloor, setSelectedFloor] = useState<number>(0);
   const [filterType, setFilterType] = useState<string>(roomFilter || 'all');
+  const [tierFilter, setTierFilter] = useState<string>('all');
   const [commonFilter, setCommonFilter] = useState<string>('all');
+
+  // Inline confirmation & feedback states (avoid window.confirm / window.alert)
+  const [confirmResetAllBeds, setConfirmResetAllBeds] = useState(false);
+  const [confirmDeleteRoomId, setConfirmDeleteRoomId] = useState<string | null>(null);
+  const [confirmDeleteAreaId, setConfirmDeleteAreaId] = useState<string | null>(null);
+  const [actionFeedback, setActionFeedback] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+
+  const showFeedback = (type: 'success' | 'error', text: string) => {
+    setActionFeedback({ type, text });
+    window.setTimeout(() => {
+      setActionFeedback((prev) => (prev?.text === text ? null : prev));
+    }, 4000);
+  };
 
   // Synchronize with global roomFilter if set from Admin Dashboard
   React.useEffect(() => {
     if (roomFilter) {
       setFilterType(roomFilter);
       if (roomFilter !== 'all' && selectedFloor === 1) {
-        setSelectedFloor(2);
+        setSelectedFloor(0);
       }
     }
   }, [roomFilter]);
@@ -89,12 +108,22 @@ export const S40_FloorsAndRooms: React.FC<FloorsProps> = ({ onSelectRoom }) => {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [isModalOpen]);
 
-  const isResidentialFloor = selectedFloor >= 2 && selectedFloor <= 5;
+  const isResidentialView = selectedFloor === 0 || (selectedFloor >= 2 && selectedFloor <= 5);
 
-  // Filter residential rooms on floors 2-5
-  const floorRooms = rooms.filter((r: Room) => r.floor === selectedFloor);
+  // Filter residential rooms on all residential floors (2-5) or selected floor, sorted by room number 1..56
+  const floorRooms = (rooms as Room[])
+    .filter((r: Room) => (selectedFloor === 0 ? r.floor >= 2 && r.floor <= 5 : r.floor === selectedFloor))
+    .slice()
+    .sort((a: Room, b: Room) => {
+      const na = parseInt(a.roomNumber, 10);
+      const nb = parseInt(b.roomNumber, 10);
+      if (!isNaN(na) && !isNaN(nb)) return na - nb;
+      return a.roomNumber.localeCompare(b.roomNumber);
+    });
 
   const filteredRooms = floorRooms.filter((room: Room) => {
+    if (tierFilter !== 'all' && room.type !== tierFilter) return false;
+
     const totalBeds = room.beds.length;
     const occupiedBeds = room.beds.filter((b) => b.status === 'occupied').length;
     const maintenanceBeds = room.beds.filter((b) => b.status === 'maintenance').length;
@@ -102,13 +131,33 @@ export const S40_FloorsAndRooms: React.FC<FloorsProps> = ({ onSelectRoom }) => {
     const currentFilter = filterType || roomFilter;
 
     if (currentFilter === 'full') return occupiedBeds === totalBeds;
-    if (currentFilter === 'empty') return occupiedBeds === 0 && maintenanceBeds === 0;
+    if (currentFilter === 'empty' || currentFilter === 'vacant') {
+      return occupiedBeds === 0 && maintenanceBeds === 0;
+    }
     if (currentFilter === 'partial') return occupiedBeds > 0 && occupiedBeds < totalBeds;
     if (currentFilter === 'maintenance') return maintenanceBeds > 0 || room.status === 'maintenance';
     if (currentFilter === 'occupied') return occupiedBeds > 0;
-    
-    return true; // 'all' holatida barcha xonalar
+
+    return true;
   });
+
+  // Aggregate metrics for All Floors (2-5)
+  const allResidentialStats = React.useMemo(() => {
+    const resRooms = (rooms as Room[]).filter((r) => r.floor >= 2 && r.floor <= 5);
+    let totalBeds = 0;
+    let occupiedBeds = 0;
+    let availableBeds = 0;
+    let maintenanceBeds = 0;
+    resRooms.forEach((r) => {
+      r.beds.forEach((b) => {
+        totalBeds++;
+        if (b.status === 'occupied') occupiedBeds++;
+        else if (b.status === 'maintenance') maintenanceBeds++;
+        else if (b.status === 'available') availableBeds++;
+      });
+    });
+    return { roomsCount: resRooms.length, totalBeds, occupiedBeds, availableBeds, maintenanceBeds };
+  }, [rooms]);
 
   // Filter 1st floor common areas
   const filteredCommonAreas = commonAreas.filter((ca: CommonArea) => {
@@ -187,10 +236,9 @@ export const S40_FloorsAndRooms: React.FC<FloorsProps> = ({ onSelectRoom }) => {
     setIsModalOpen(false);
   };
 
-  const handleDeleteArea = (id: string, name: string) => {
-    if (window.confirm(`${t('common.delete')} "${name}"?`)) {
-      deleteCommonArea(id);
-    }
+  const handleConfirmDeleteArea = (id: string) => {
+    deleteCommonArea(id);
+    setConfirmDeleteAreaId(null);
   };
 
   const getCategoryIcon = (cat: CommonAreaCategory) => {
@@ -229,56 +277,88 @@ export const S40_FloorsAndRooms: React.FC<FloorsProps> = ({ onSelectRoom }) => {
         </div>
 
         {/* Dynamic Filter Tabs */}
-        {isResidentialFloor ? (
-          <div className="flex items-center gap-1 bg-slate-100 p-1 rounded-xl text-xs font-semibold overflow-x-auto max-w-full">
-            <button
-              onClick={() => handleFilterChange('all')}
-              className={`px-3 py-1.5 rounded-lg transition-colors cursor-pointer whitespace-nowrap ${
-                filterType === 'all' ? 'bg-white text-slate-900 shadow-2xs font-bold' : 'text-slate-600 hover:text-slate-900'
-              }`}
-            >
-              {t('common.all')}
-            </button>
-            <button
-              onClick={() => handleFilterChange('occupied')}
-              className={`px-3 py-1.5 rounded-lg transition-colors cursor-pointer whitespace-nowrap ${
-                filterType === 'occupied' ? 'bg-white text-sky-800 shadow-2xs font-bold' : 'text-slate-600 hover:text-slate-900'
-              }`}
-            >
-              Band
-            </button>
-            <button
-              onClick={() => handleFilterChange('full')}
-              className={`px-3 py-1.5 rounded-lg transition-colors cursor-pointer whitespace-nowrap ${
-                filterType === 'full' ? 'bg-white text-rose-800 shadow-2xs font-bold' : 'text-slate-600 hover:text-slate-900'
-              }`}
-            >
-              To‘liq band
-            </button>
-            <button
-              onClick={() => handleFilterChange('partial')}
-              className={`px-3 py-1.5 rounded-lg transition-colors cursor-pointer whitespace-nowrap ${
-                filterType === 'partial' ? 'bg-white text-indigo-800 shadow-2xs font-bold' : 'text-slate-600 hover:text-slate-900'
-              }`}
-            >
-              Qisman band
-            </button>
-            <button
-              onClick={() => handleFilterChange('empty')}
-              className={`px-3 py-1.5 rounded-lg transition-colors cursor-pointer whitespace-nowrap ${
-                filterType === 'empty' || filterType === 'vacant' ? 'bg-white text-emerald-800 shadow-2xs font-bold' : 'text-slate-600 hover:text-slate-900'
-              }`}
-            >
-              Bo‘sh
-            </button>
-            <button
-              onClick={() => handleFilterChange('maintenance')}
-              className={`px-3 py-1.5 rounded-lg transition-colors cursor-pointer whitespace-nowrap ${
-                filterType === 'maintenance' ? 'bg-white text-amber-800 shadow-2xs font-bold' : 'text-slate-600 hover:text-slate-900'
-              }`}
-            >
-              Ta’mirda
-            </button>
+        {isResidentialView ? (
+          <div className="flex flex-col items-end gap-2 max-w-full">
+            <div className="flex items-center gap-1 bg-slate-100 p-1 rounded-xl text-xs font-semibold overflow-x-auto max-w-full">
+              <button
+                onClick={() => handleFilterChange('all')}
+                className={`px-3 py-1.5 rounded-lg transition-colors cursor-pointer whitespace-nowrap ${
+                  filterType === 'all' ? 'bg-white text-slate-900 shadow-2xs font-bold' : 'text-slate-600 hover:text-slate-900'
+                }`}
+              >
+                {t('common.all')}
+              </button>
+              <button
+                onClick={() => handleFilterChange('occupied')}
+                className={`px-3 py-1.5 rounded-lg transition-colors cursor-pointer whitespace-nowrap ${
+                  filterType === 'occupied' ? 'bg-white text-sky-800 shadow-2xs font-bold' : 'text-slate-600 hover:text-slate-900'
+                }`}
+              >
+                {t('rooms.filterOccupied')}
+              </button>
+              <button
+                onClick={() => handleFilterChange('full')}
+                className={`px-3 py-1.5 rounded-lg transition-colors cursor-pointer whitespace-nowrap ${
+                  filterType === 'full' ? 'bg-white text-rose-800 shadow-2xs font-bold' : 'text-slate-600 hover:text-slate-900'
+                }`}
+              >
+                {t('rooms.filterFull')}
+              </button>
+              <button
+                onClick={() => handleFilterChange('partial')}
+                className={`px-3 py-1.5 rounded-lg transition-colors cursor-pointer whitespace-nowrap ${
+                  filterType === 'partial' ? 'bg-white text-indigo-800 shadow-2xs font-bold' : 'text-slate-600 hover:text-slate-900'
+                }`}
+              >
+                {t('rooms.filterPartial')}
+              </button>
+              <button
+                onClick={() => handleFilterChange('empty')}
+                className={`px-3 py-1.5 rounded-lg transition-colors cursor-pointer whitespace-nowrap ${
+                  filterType === 'empty' || filterType === 'vacant' ? 'bg-white text-emerald-800 shadow-2xs font-bold' : 'text-slate-600 hover:text-slate-900'
+                }`}
+              >
+                {t('rooms.filterEmpty')}
+              </button>
+              <button
+                onClick={() => handleFilterChange('maintenance')}
+                className={`px-3 py-1.5 rounded-lg transition-colors cursor-pointer whitespace-nowrap ${
+                  filterType === 'maintenance' ? 'bg-white text-amber-800 shadow-2xs font-bold' : 'text-slate-600 hover:text-slate-900'
+                }`}
+              >
+                {t('rooms.filterMaintenance')}
+              </button>
+            </div>
+
+            {/* Room Tier Filter Pills */}
+            <div className="flex items-center gap-1 flex-wrap justify-end text-[11px] font-semibold">
+              <span className="text-slate-400 mr-1">{t('rooms.tierFilterLabel')}</span>
+              <button
+                type="button"
+                onClick={() => setTierFilter('all')}
+                className={`px-2.5 py-1 rounded-lg border transition-colors cursor-pointer ${
+                  tierFilter === 'all'
+                    ? 'bg-[#101C32] text-[#C6A15B] border-[#101C32] font-bold'
+                    : 'bg-white text-slate-600 border-slate-200 hover:border-slate-300'
+                }`}
+              >
+                {t('rooms.allTiers')}
+              </button>
+              {ROOM_TYPE_ORDER.map((tier) => (
+                <button
+                  key={tier}
+                  type="button"
+                  onClick={() => setTierFilter(tier)}
+                  className={`px-2.5 py-1 rounded-lg border transition-colors cursor-pointer ${
+                    tierFilter === tier
+                      ? 'bg-[#101C32] text-[#C6A15B] border-[#101C32] font-bold'
+                      : 'bg-white text-slate-600 border-slate-200 hover:border-slate-300'
+                  }`}
+                >
+                  {t(`rooms.${tier}`)}
+                </button>
+              ))}
+            </div>
           </div>
         ) : (
           <div className="flex items-center gap-1 bg-slate-100 p-1 rounded-xl text-xs font-semibold">
@@ -310,8 +390,66 @@ export const S40_FloorsAndRooms: React.FC<FloorsProps> = ({ onSelectRoom }) => {
         )}
       </div>
 
-      {/* Floor Selector Buttons: All 5 Physical Floors Displayed */}
-      <div className="grid grid-cols-1 sm:grid-cols-3 lg:grid-cols-5 gap-3">
+      {/* Inline Feedback Banner */}
+      {actionFeedback && (
+        <div
+          className={`p-3.5 rounded-2xl border text-xs font-semibold flex items-center justify-between gap-3 ${
+            actionFeedback.type === 'success'
+              ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+              : 'bg-rose-50 border-rose-200 text-rose-800'
+          }`}
+        >
+          <div className="flex items-center gap-2">
+            {actionFeedback.type === 'success' ? (
+              <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+            ) : (
+              <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0" />
+            )}
+            <span>{actionFeedback.text}</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => setActionFeedback(null)}
+            className="text-[11px] font-bold opacity-70 hover:opacity-100 cursor-pointer"
+          >
+            {t('common.close')}
+          </button>
+        </div>
+      )}
+
+      {/* Floor Selector Buttons: All Floors + All 5 Physical Floors Displayed */}
+      <div className="grid grid-cols-1 sm:grid-cols-3 lg:grid-cols-6 gap-3">
+        {/* All Residential Floors (2-5) */}
+        <button
+          onClick={() => setSelectedFloor(0)}
+          className={`p-4 rounded-2xl border text-left transition-all cursor-pointer ${
+            selectedFloor === 0
+              ? 'bg-[#101C32] text-white border-[#101C32] shadow-lg ring-2 ring-[#C6A15B]'
+              : 'bg-white hover:bg-slate-50 text-slate-800 border-slate-200'
+          }`}
+        >
+          <div className="flex items-center justify-between mb-1 gap-1">
+            <span className="font-extrabold text-sm truncate">{t('rooms.allFloors')}</span>
+            <span
+              className={`text-[10px] font-bold px-2 py-0.5 rounded-full shrink-0 ${
+                selectedFloor === 0 ? 'bg-[#C6A15B] text-[#101C32]' : 'bg-slate-100 text-slate-600'
+              }`}
+            >
+              {allResidentialStats.roomsCount} {t('common.room').toLowerCase()}
+            </span>
+          </div>
+          <div className={`text-xs ${selectedFloor === 0 ? 'text-slate-200' : 'text-slate-500'}`}>
+            <strong>{allResidentialStats.occupiedBeds}</strong> / {allResidentialStats.totalBeds} {t('common.bed').toLowerCase()}
+          </div>
+          <div
+            className={`text-[10px] mt-2 pt-1 border-t flex items-center justify-between ${
+              selectedFloor === 0 ? 'border-white/10 text-slate-300' : 'border-slate-100 text-slate-400'
+            }`}
+          >
+            <span>{allResidentialStats.availableBeds} {t('beds.available').toLowerCase()}</span>
+            <span className="font-mono font-medium">2–5</span>
+          </div>
+        </button>
         {/* Floor 1: Non-residential / common-use facilities */}
         <button
           onClick={() => setSelectedFloor(1)}
@@ -530,20 +668,41 @@ export const S40_FloorsAndRooms: React.FC<FloorsProps> = ({ onSelectRoom }) => {
                     {/* Bottom Action Buttons */}
                     {role !== 'security' && (
                       <div className="pt-3 mt-4 border-t border-slate-100 flex items-center justify-end gap-2">
-                        <button
-                          onClick={() => handleOpenEditModal(area)}
-                          className="p-1.5 text-slate-600 hover:text-sky-600 hover:bg-sky-50 rounded-lg transition-colors cursor-pointer"
-                          title={t('common.edit')}
-                        >
-                          <Edit2 className="w-4 h-4" />
-                        </button>
-                        <button
-                          onClick={() => handleDeleteArea(area.id, area.name)}
-                          className="p-1.5 text-slate-600 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition-colors cursor-pointer"
-                          title={t('common.delete')}
-                        >
-                          <Trash2 className="w-4 h-4" />
-                        </button>
+                        {confirmDeleteAreaId === area.id ? (
+                          <div className="flex items-center gap-1.5 text-[11px]">
+                            <button
+                              type="button"
+                              onClick={() => setConfirmDeleteAreaId(null)}
+                              className="px-2.5 py-1 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold cursor-pointer"
+                            >
+                              {t('common.cancel')}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleConfirmDeleteArea(area.id)}
+                              className="px-2.5 py-1 rounded-lg bg-rose-600 hover:bg-rose-700 text-white font-bold cursor-pointer"
+                            >
+                              {t('common.delete')}
+                            </button>
+                          </div>
+                        ) : (
+                          <>
+                            <button
+                              onClick={() => handleOpenEditModal(area)}
+                              className="p-1.5 text-slate-600 hover:text-sky-600 hover:bg-sky-50 rounded-lg transition-colors cursor-pointer"
+                              title={t('common.edit')}
+                            >
+                              <Edit2 className="w-4 h-4" />
+                            </button>
+                            <button
+                              onClick={() => setConfirmDeleteAreaId(area.id)}
+                              className="p-1.5 text-slate-600 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition-colors cursor-pointer"
+                              title={t('common.delete')}
+                            >
+                              <Trash2 className="w-4 h-4" />
+                            </button>
+                          </>
+                        )}
                       </div>
                     )}
                   </div>
@@ -557,47 +716,98 @@ export const S40_FloorsAndRooms: React.FC<FloorsProps> = ({ onSelectRoom }) => {
         <div className="space-y-4">
           {/* Floor Progress & Configuration Banner */}
           {(() => {
-            const currentFloorRooms = rooms.filter((r: Room) => r.floor === selectedFloor);
+            const currentFloorRooms = (rooms as Room[]).filter((r: Room) =>
+              selectedFloor === 0 ? r.floor >= 2 && r.floor <= 5 : r.floor === selectedFloor
+            );
             const currentFloorBeds = currentFloorRooms.reduce((acc: number, r: Room) => acc + r.beds.length, 0);
-            const expectedFloorBeds = selectedFloor === 2 || selectedFloor === 3 ? 88 : 86;
-            const isStandard = currentFloorRooms.length === 14 && currentFloorBeds === expectedFloorBeds;
+            const expectedFloorRooms = selectedFloor === 0 ? 56 : 14;
+            const expectedFloorBeds = selectedFloor === 0 ? 344 : 86;
+            const isStandard = currentFloorRooms.length === expectedFloorRooms && currentFloorBeds === expectedFloorBeds;
 
             return (
-              <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-2xs flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
-                <div className="space-y-1.5 flex-1">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <span className="text-xs font-bold text-slate-500 uppercase tracking-wider">
-                      {t('rooms.floorProgress')}
-                    </span>
-                    <span className="text-xs font-semibold px-2.5 py-0.5 rounded-full bg-slate-100 text-slate-800">
-                      {t('rooms.roomsEntered', { count: currentFloorRooms.length, expected: 14 })}
-                    </span>
-                    <span className="text-xs font-semibold px-2.5 py-0.5 rounded-full bg-slate-100 text-slate-800">
-                      {t('rooms.bedsEntered', { count: currentFloorBeds, expected: expectedFloorBeds })}
-                    </span>
+              <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-2xs space-y-3">
+                <div className="flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
+                  <div className="space-y-1.5 flex-1">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="text-xs font-bold text-slate-500 uppercase tracking-wider">
+                        {t('rooms.floorProgress')}
+                      </span>
+                      <span className="text-xs font-semibold px-2.5 py-0.5 rounded-full bg-slate-100 text-slate-800">
+                        {t('rooms.roomsEntered', { count: currentFloorRooms.length, expected: expectedFloorRooms })}
+                      </span>
+                      <span className="text-xs font-semibold px-2.5 py-0.5 rounded-full bg-slate-100 text-slate-800">
+                        {t('rooms.bedsEntered', { count: currentFloorBeds, expected: expectedFloorBeds })}
+                      </span>
+                    </div>
+
+                    {!isStandard && (
+                      <div className="flex items-center gap-2 text-xs text-amber-700 bg-amber-50 px-3 py-1.5 rounded-xl border border-amber-200/80">
+                        <AlertTriangle className="w-4 h-4 shrink-0 text-amber-600" />
+                        <span>{t('rooms.expectedWarning', { expectedRooms: expectedFloorRooms, expectedBeds: expectedFloorBeds })}</span>
+                      </div>
+                    )}
                   </div>
 
-                  {!isStandard && (
-                    <div className="flex items-center gap-2 text-xs text-amber-700 bg-amber-50 px-3 py-1.5 rounded-xl border border-amber-200/80">
-                      <AlertTriangle className="w-4 h-4 shrink-0 text-amber-600" />
-                      <span>{t('rooms.expectedWarning', { expectedRooms: 14, expectedBeds: expectedFloorBeds })}</span>
+                  {/* Owner/Manager Actions: Reset All Beds + Configure New Room */}
+                  {canConfigureRooms && (
+                    <div className="flex flex-wrap items-center gap-2 shrink-0">
+                      {resetAllBedsToAvailable && (
+                        <button
+                          type="button"
+                          onClick={() => setConfirmResetAllBeds((prev) => !prev)}
+                          className="px-3.5 py-2.5 bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-200 font-bold text-xs rounded-xl transition-all flex items-center gap-1.5 cursor-pointer"
+                        >
+                          <RotateCcw className="w-3.5 h-3.5 text-amber-700" />
+                          <span>{t('rooms.resetAllBedsBtn')}</span>
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setRoomToEdit(null);
+                          setIsRoomConfigOpen(true);
+                        }}
+                        className="px-4 py-2.5 bg-[#101C32] hover:bg-[#1A2D4F] text-[#C6A15B] hover:text-white font-bold text-xs rounded-xl shadow-sm transition-all flex items-center gap-1.5 cursor-pointer"
+                      >
+                        <Plus className="w-4 h-4 text-[#C6A15B]" />
+                        {t('rooms.addRoom')}
+                      </button>
                     </div>
                   )}
                 </div>
 
-                {/* Owner/Manager Action: Configure New Room Button */}
-                {canConfigureRooms && (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setRoomToEdit(null);
-                      setIsRoomConfigOpen(true);
-                    }}
-                    className="px-4 py-2.5 bg-[#101C32] hover:bg-[#1A2D4F] text-[#C6A15B] hover:text-white font-bold text-xs rounded-xl shadow-sm transition-all flex items-center gap-1.5 shrink-0 cursor-pointer"
-                  >
-                    <Plus className="w-4 h-4 text-[#C6A15B]" />
-                    {t('rooms.addRoom')}
-                  </button>
+                {/* Inline Confirmation Panel for Reset All Beds */}
+                {confirmResetAllBeds && resetAllBedsToAvailable && (
+                  <div className="p-4 rounded-xl bg-amber-50/90 border border-amber-300 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                    <div className="space-y-0.5">
+                      <div className="font-extrabold text-amber-950 text-xs">
+                        {t('rooms.resetAllBedsConfirmTitle')}
+                      </div>
+                      <p className="text-[11px] text-amber-900/85">
+                        {t('rooms.resetAllBedsConfirmDesc')}
+                      </p>
+                    </div>
+                    <div className="flex items-center gap-2 shrink-0">
+                      <button
+                        type="button"
+                        onClick={() => setConfirmResetAllBeds(false)}
+                        className="px-3 py-1.5 rounded-lg bg-white hover:bg-slate-100 text-slate-700 border border-slate-200 font-bold text-xs cursor-pointer"
+                      >
+                        {t('common.cancel')}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          resetAllBedsToAvailable();
+                          setConfirmResetAllBeds(false);
+                          showFeedback('success', t('rooms.resetAllBedsSuccess'));
+                        }}
+                        className="px-3.5 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-700 text-white font-bold text-xs cursor-pointer"
+                      >
+                        {t('rooms.resetAllBedsConfirmBtn')}
+                      </button>
+                    </div>
+                  </div>
                 )}
               </div>
             );
@@ -609,10 +819,11 @@ export const S40_FloorsAndRooms: React.FC<FloorsProps> = ({ onSelectRoom }) => {
               <div>
                 <h3 className="font-extrabold text-slate-900 text-sm flex items-center gap-2">
                   <Building className="w-4 h-4 text-sky-600" />
-                  {selectedFloor}-{t('common.floor')} ({filteredRooms.length} {t('common.room').toLowerCase()})
+                  {selectedFloor === 0 ? t('rooms.allFloors') : `${selectedFloor}-${t('common.floor')}`} ({filteredRooms.length} {t('common.room').toLowerCase()})
                 </h3>
                 <p className="text-xs text-slate-500 mt-0.5">
-                  Building → Floor {selectedFloor} → {filteredRooms.length} Rooms
+                  {selectedFloor === 0 ? t('rooms.allFloors') : `${selectedFloor}-${t('common.floor')}`} · {filteredRooms.length} {t('common.room').toLowerCase()}
+                  {tierFilter !== 'all' ? ` · ${t(`rooms.${tierFilter}`)}` : ''}
                 </p>
               </div>
               <span className="text-xs text-slate-500 font-medium">
@@ -648,13 +859,13 @@ export const S40_FloorsAndRooms: React.FC<FloorsProps> = ({ onSelectRoom }) => {
                               {t('common.room')} {room.roomNumber}
                             </span>
                             <span className="text-[10px] text-slate-400 font-medium">
-                              Floor {room.floor} • №{(room.floor - 2) * 14 + parseInt(room.roomNumber.slice(1), 10)}
+                              {room.floor}-{t('common.floor')} • {t('student.capacityBeds', { capacity: room.capacity })}
                             </span>
                           </div>
 
                           <div className="flex items-center gap-1">
                             <span
-                              className={`text-[10px] font-bold uppercase px-2 py-0.5 rounded-md whitespace-nowrap ${
+                              className={`text-[10px] font-bold px-2 py-0.5 rounded-md whitespace-nowrap ${
                                 room.status === 'maintenance' || room.isClosedForMaintenance
                                   ? 'bg-amber-100 text-amber-800'
                                   : room.type === 'lux'
@@ -689,24 +900,47 @@ export const S40_FloorsAndRooms: React.FC<FloorsProps> = ({ onSelectRoom }) => {
                               </button>
                             )}
 
-                            {/* Owner/Manager delete button */}
+                            {/* Owner/Manager delete button (inline confirmation) */}
                             {canConfigureRooms && (
-                              <button
-                                type="button"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  if (window.confirm(t('rooms.deleteRoomConfirm', { roomNumber: room.roomNumber }))) {
-                                    const res = deleteRoom(room.id);
-                                    if (!res.success && res.error) {
-                                      alert(res.error);
-                                    }
-                                  }
-                                }}
-                                title={t('rooms.deleteRoom')}
-                                className="p-1 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition-colors cursor-pointer"
-                              >
-                                <Trash2 className="w-3.5 h-3.5" />
-                              </button>
+                              confirmDeleteRoomId === room.id ? (
+                                <div
+                                  onClick={(e) => e.stopPropagation()}
+                                  className="flex items-center gap-1"
+                                >
+                                  <button
+                                    type="button"
+                                    onClick={() => setConfirmDeleteRoomId(null)}
+                                    className="px-1.5 py-0.5 text-[10px] font-semibold bg-slate-100 hover:bg-slate-200 text-slate-700 rounded cursor-pointer"
+                                  >
+                                    {t('common.cancel')}
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      const res = deleteRoom(room.id);
+                                      setConfirmDeleteRoomId(null);
+                                      if (!res.success && res.error) {
+                                        showFeedback('error', res.error);
+                                      }
+                                    }}
+                                    className="px-1.5 py-0.5 text-[10px] font-bold bg-rose-600 hover:bg-rose-700 text-white rounded cursor-pointer"
+                                  >
+                                    {t('common.delete')}
+                                  </button>
+                                </div>
+                              ) : (
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setConfirmDeleteRoomId(room.id);
+                                  }}
+                                  title={t('rooms.deleteRoom')}
+                                  className="p-1 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition-colors cursor-pointer"
+                                >
+                                  <Trash2 className="w-3.5 h-3.5" />
+                                </button>
+                              )
                             )}
                           </div>
                         </div>
@@ -717,7 +951,7 @@ export const S40_FloorsAndRooms: React.FC<FloorsProps> = ({ onSelectRoom }) => {
                           </span>
                         </div>
 
-                        {/* Individual Bed Identifiers Badges */}
+                        {/* Individual Bed Identifiers Badges with Resident Name & App ID when occupied */}
                         <div
                           onClick={() => onSelectRoom(room.id)}
                           className="space-y-1.5 cursor-pointer my-2.5"
@@ -727,30 +961,49 @@ export const S40_FloorsAndRooms: React.FC<FloorsProps> = ({ onSelectRoom }) => {
                             <span className="font-mono text-slate-400">{room.beds.length} {t('common.bed').toLowerCase()}</span>
                           </div>
                           <div className="flex flex-wrap gap-1">
-                            {room.beds.map((b: Bed) => (
-                              <span
-                                key={b.id}
-                                title={`Bed ${b.bedIdentifier || b.bedNumber} — ${b.status}`}
-                                className={`text-[10px] font-mono font-bold px-1.5 py-0.5 rounded border flex items-center gap-1 ${
-                                  b.status === 'occupied'
-                                    ? 'bg-rose-50 text-rose-700 border-rose-200'
-                                    : b.status === 'maintenance'
-                                    ? 'bg-amber-50 text-amber-700 border-amber-200'
-                                    : 'bg-emerald-50 text-emerald-700 border-emerald-200'
-                                }`}
-                              >
+                            {room.beds.map((b: Bed) => {
+                              const resident = b.studentId
+                                ? (students as Student[] | undefined)?.find((s) => s.id === b.studentId)
+                                : undefined;
+                              const bedNumLabel = b.bedIdentifier || b.bedNumber;
+                              const residentName = resident?.fullName || b.studentName;
+                              const residentShort = residentName ? residentName.split(' ')[0] : '';
+                              const appIdTag = resident?.applicationId ? ` (${resident.applicationId})` : '';
+
+                              return (
                                 <span
-                                  className={`w-1.5 h-1.5 rounded-full ${
+                                  key={b.id}
+                                  title={
+                                    b.status === 'occupied' && residentName
+                                      ? `${t('common.bed')} ${bedNumLabel} — ${residentName}${appIdTag}`
+                                      : `${t('common.bed')} ${bedNumLabel} — ${b.status}`
+                                  }
+                                  className={`text-[10px] font-mono font-bold px-1.5 py-0.5 rounded border flex items-center gap-1 max-w-full ${
                                     b.status === 'occupied'
-                                      ? 'bg-rose-500'
+                                      ? 'bg-rose-50 text-rose-700 border-rose-200'
                                       : b.status === 'maintenance'
-                                      ? 'bg-amber-500'
-                                      : 'bg-emerald-500'
+                                      ? 'bg-amber-50 text-amber-700 border-amber-200'
+                                      : 'bg-emerald-50 text-emerald-700 border-emerald-200'
                                   }`}
-                                />
-                                {b.bedIdentifier || b.bedNumber}
-                              </span>
-                            ))}
+                                >
+                                  <span
+                                    className={`w-1.5 h-1.5 rounded-full shrink-0 ${
+                                      b.status === 'occupied'
+                                        ? 'bg-rose-500'
+                                        : b.status === 'maintenance'
+                                        ? 'bg-amber-500'
+                                        : 'bg-emerald-500'
+                                    }`}
+                                  />
+                                  <span className="shrink-0">{bedNumLabel}</span>
+                                  {b.status === 'occupied' && residentShort && (
+                                    <span className="font-sans font-semibold truncate max-w-[115px]">
+                                      · {residentShort}{resident?.applicationId ? ` (${resident.applicationId})` : ''}
+                                    </span>
+                                  )}
+                                </span>
+                              );
+                            })}
                           </div>
                         </div>
 
@@ -797,7 +1050,7 @@ export const S40_FloorsAndRooms: React.FC<FloorsProps> = ({ onSelectRoom }) => {
       {isRoomConfigOpen && (
         <S42_RoomConfigModal
           roomToEdit={roomToEdit}
-          initialFloor={selectedFloor}
+          initialFloor={selectedFloor === 0 ? 2 : selectedFloor}
           onClose={() => {
             setIsRoomConfigOpen(false);
             setRoomToEdit(null);

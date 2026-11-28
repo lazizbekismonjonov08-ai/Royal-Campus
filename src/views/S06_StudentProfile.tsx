@@ -2,13 +2,36 @@ import React from 'react';
 import { useDorm } from '../context/DormContext';
 import { useI18n } from '../i18n/I18nContext';
 import { User, Phone, GraduationCap, FileCheck } from 'lucide-react';
+import { ROOM_TYPE_CAPACITY } from '../types';
 
 export const S06_StudentProfile: React.FC = () => {
-  const { students, activeStudentId } = useDorm();
+  const { students, activeStudentId, rooms, applications } = useDorm();
   const { t, formatCurrency, formatDate } = useI18n();
   const student = students.find((s) => s.id === activeStudentId) || students[0];
 
-  if (!student) return null;
+  if (!student) {
+    return <div className="p-6 text-center text-slate-500">{t('student.notFound')}</div>;
+  }
+
+  const linkedApp = applications.find(
+    (a) => (student.applicationId && a.id === student.applicationId) || a.studentId === student.id
+  );
+  const effectiveRoomType = student.roomType || linkedApp?.preferredRoomType;
+  const assignedRoom = rooms.find(
+    (r) =>
+      (student.roomId && r.id === student.roomId) ||
+      (student.roomNumber && r.roomNumber === student.roomNumber)
+  );
+  const roomCapacity =
+    assignedRoom?.capacity ||
+    (effectiveRoomType ? ROOM_TYPE_CAPACITY[effectiveRoomType] : undefined);
+  const bedLabel = student.bedIdentifier || (student.bedNumber ? String(student.bedNumber) : '');
+  const formattedRoomBed =
+    student.roomNumber && bedLabel
+      ? t('student.roomBedFormat', { room: student.roomNumber, bed: bedLabel })
+      : student.roomNumber
+      ? `${t('common.room')} ${student.roomNumber}`
+      : t('student.awaitingRoom');
 
   return (
     <div className="p-4 md:p-6 space-y-6 max-w-4xl mx-auto">
@@ -90,17 +113,26 @@ export const S06_StudentProfile: React.FC = () => {
             </h3>
             <div className="space-y-2.5 bg-slate-50 p-4 rounded-xl border border-slate-200">
               <div>
-                <span className="text-slate-500 block">{t('common.room')}:</span>
+                <span className="text-slate-500 block">{t('student.residenceRoom')}</span>
                 <span className="font-semibold text-slate-900">
                   {student.roomNumber
-                    ? `${t('common.room')} ${student.roomNumber} (${student.floor}-${t('common.floor')})`
-                    : t('beds.available')}
+                    ? `${formattedRoomBed} (${student.floor || assignedRoom?.floor || '-'}-${t('common.floor')})`
+                    : t('student.awaitingRoom')}
                 </span>
               </div>
+              {roomCapacity && (
+                <div>
+                  <span className="text-slate-500 block">{t('student.roomCapacityLabel')}</span>
+                  <span className="font-semibold text-slate-900">
+                    {t('student.capacityBeds', { capacity: roomCapacity })}
+                  </span>
+                </div>
+              )}
               <div>
                 <span className="text-slate-500 block">{t('studentProfile.tariff')}</span>
                 <span className="font-semibold text-slate-900">
-                  {student.bedNumber}-{t('common.bed')} ({student.roomType?.toUpperCase()}) • {formatCurrency(student.monthlyTariff)}
+                  {effectiveRoomType ? `${t(`rooms.${effectiveRoomType}`)} • ` : ''}
+                  {formatCurrency(student.monthlyTariff || linkedApp?.monthlyTariff || 0)}
                 </span>
               </div>
             </div>

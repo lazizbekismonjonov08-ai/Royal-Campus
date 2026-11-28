@@ -1,14 +1,30 @@
-import React, { useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import { useDorm } from '../context/DormContext';
 import { useI18n } from '../i18n/I18nContext';
+import {
+  ACADEMIC_BILLING_MONTHS,
+  comparePaymentsChronoDesc,
+  computeStudentBillingSummary,
+  findLinkedApplication,
+  formatDateTimeCommaDisplay,
+  formatMethodLabel,
+  formatShortDateDisplay,
+  isMonthlyPaymentRecord,
+} from '../utils/billingUtils';
+import { S53_BillingEditorModal } from './S53_BillingEditorModal';
+import { PaymentStatementModal } from '../components/PaymentStatementModal';
+import { PaymentExpiryBadge } from '../components/PaymentExpiryBadge';
 import {
   ArrowRightLeft,
   Trash2,
   PlusCircle,
   Plus,
   CheckCircle2,
+  Edit3,
+  Printer,
 } from 'lucide-react';
 import { ModalCloseButton } from '../components/ModalCloseButton';
+import { ConfirmDeleteModal } from '../components/ConfirmDeleteModal';
 import { useModalDismiss } from '../hooks/useModalDismiss';
 
 interface StudentDetailProps {
@@ -26,6 +42,10 @@ export const S21_StudentDetailModal: React.FC<StudentDetailProps> = ({
 }) => {
   const {
     students,
+    applications,
+    rooms,
+    settings,
+    billingLedgers,
     deleteStudent,
     payments,
     contracts,
@@ -34,12 +54,15 @@ export const S21_StudentDetailModal: React.FC<StudentDetailProps> = ({
     role,
     handleAcceptPayment,
   } = useDorm();
-  const { t, formatCurrency, formatDate } = useI18n();
+  const { t, language, formatCurrency, formatDate } = useI18n();
   const [activeTab, setActiveTab] = useState<'profile' | 'payments' | 'contract' | 'discipline'>('profile');
   const [successToast, setSuccessToast] = useState<string | null>(null);
   const [showViolationInput, setShowViolationInput] = useState(false);
   const [violationReason, setViolationReason] = useState('');
   const [penaltyPoints, setPenaltyPoints] = useState(10);
+  const [showBillingEditor, setShowBillingEditor] = useState(false);
+  const [showStatementModal, setShowStatementModal] = useState(false);
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
 
   const { handleDismiss, handleBackdropClick } = useModalDismiss({
     onClose,
@@ -48,10 +71,42 @@ export const S21_StudentDetailModal: React.FC<StudentDetailProps> = ({
 
   const student = students.find((s) => s.id === studentId);
 
-  if (!student) return null;
+  const linkedApp = useMemo(
+    () => findLinkedApplication(student, applications),
+    [student, applications]
+  );
 
-  const stdPayments = payments.filter((p) => p.studentId === student.id);
-  const stdContract = contracts.find((c) => c.studentId === student.id);
+  const stdContract = useMemo(
+    () => (student ? contracts.find((c) => c.studentId === student.id && c.status === 'active') || contracts.find((c) => c.studentId === student.id) : undefined),
+    [contracts, student]
+  );
+
+  const billingSummary = useMemo(() => {
+    if (!student) return undefined;
+    return computeStudentBillingSummary({
+      entityId: student.id,
+      student,
+      application: linkedApp,
+      contract: stdContract,
+      rooms,
+      settings,
+      payments,
+      ledger: billingLedgers[student.id],
+    });
+  }, [student, linkedApp, stdContract, rooms, settings, payments, billingLedgers]);
+
+  if (!student || !billingSummary) return null;
+
+  const stdPayments = [
+    ...payments.filter((p) => p.studentId === student.id && isMonthlyPaymentRecord(p)),
+  ].sort(comparePaymentsChronoDesc);
+  const formatPeriodLabel = (period: string) => {
+    const found = ACADEMIC_BILLING_MONTHS.find((m) => m.period === period);
+    if (!found) return period;
+    if (language === 'ru') return found.ru;
+    if (language === 'en') return found.en;
+    return found.uz;
+  };
   const stdDiscipline = disciplineRecords.filter((d) => d.studentId === student.id);
   const totalPenaltyPoints = stdDiscipline.reduce((acc, d) => acc + d.penaltyPoints, 0);
 
@@ -68,16 +123,15 @@ export const S21_StudentDetailModal: React.FC<StudentDetailProps> = ({
   };
 
   const handleQuickAccept = () => {
-    handleAcceptPayment(student.id, student.monthlyTariff);
-    setSuccessToast(`✅ ${student.fullName} uchun ${formatCurrency(student.monthlyTariff)} to‘lov qabul qilindi va keyingi to‘lov sanasi 1 oyga surildi!`);
+    handleAcceptPayment(student.id, billingSummary.monthlyRate);
+    setSuccessToast(`${student.fullName}: ${formatCurrency(billingSummary.monthlyRate)}`);
     setTimeout(() => setSuccessToast(null), 5000);
   };
 
-  const handleDeleteStudent = () => {
-    if (window.confirm(`${t('common.delete')} ${student.fullName}?`)) {
-      deleteStudent(student.id);
-      onClose();
-    }
+  const handleConfirmDelete = () => {
+    deleteStudent(student.id);
+    setShowDeleteConfirm(false);
+    onClose();
   };
 
   return (
@@ -124,24 +178,39 @@ export const S21_StudentDetailModal: React.FC<StudentDetailProps> = ({
           <div className="flex items-center gap-2">
             <span className="font-bold text-sky-900">
               {student.roomNumber
-                ? `${t('common.room')} ${student.roomNumber} (${t('rooms.bed', { bedNumber: student.bedNumber || 1 })})`
-                : t('beds.available')}
+                ? (student.bedIdentifier || student.bedNumber)
+                  ? t('student.roomBedFormat', {
+                      room: student.roomNumber,
+                      bed: String(student.bedIdentifier || student.bedNumber),
+                    })
+                  : `${t('common.room')} ${student.roomNumber}`
+                : t('student.awaitingRoom')}
             </span>
             <span className="text-slate-400">•</span>
             <span className="text-slate-600">
-              {t('students.paidUntil')}: {formatDate(student.paidUntil)}
+              {t('payments.paidUntilLabel')}:{' '}
+              <strong className="text-slate-900 tabular-nums">
+                {formatShortDateDisplay(billingSummary.paidUntilDate)}
+              </strong>
             </span>
+            <PaymentExpiryBadge paidUntilDate={billingSummary.paidUntilDate} compact />
           </div>
 
           {role !== 'security' && (
             <div className="flex items-center gap-2 flex-wrap">
               <button
                 type="button"
+                onClick={() => setShowBillingEditor(true)}
+                className="px-3 py-1.5 bg-[#101C32] hover:bg-[#1A2D4F] text-[#EAD096] font-bold rounded-lg shadow-2xs transition-colors flex items-center gap-1 cursor-pointer"
+              >
+                <Edit3 className="w-3.5 h-3.5 text-[#C6A15B]" /> {t('billing.managePayments')}
+              </button>
+              <button
+                type="button"
                 onClick={handleQuickAccept}
                 className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-lg shadow-2xs transition-colors flex items-center gap-1 cursor-pointer"
-                title="To‘lovni darhol qabul qilish va keyingi to‘lov muddatini 1 oyga surish"
               >
-                <CheckCircle2 className="w-3.5 h-3.5" /> To‘lov qabul qilish (+1 oy)
+                <CheckCircle2 className="w-3.5 h-3.5" /> +1 {t('billing.monthShort')}
               </button>
               <button
                 type="button"
@@ -160,11 +229,12 @@ export const S21_StudentDetailModal: React.FC<StudentDetailProps> = ({
               </button>
               <button
                 type="button"
-                onClick={handleDeleteStudent}
-                className="px-2.5 py-1.5 bg-rose-50 hover:bg-rose-100 text-rose-700 font-bold rounded-lg transition-colors flex items-center gap-1 cursor-pointer"
-                title={t('common.delete')}
+                onClick={() => setShowDeleteConfirm(true)}
+                className="px-2.5 py-1.5 bg-rose-50 hover:bg-rose-600 text-rose-700 hover:text-white border border-rose-200 font-bold rounded-lg transition-colors flex items-center gap-1 cursor-pointer"
+                title={t('students.deleteResident')}
               >
                 <Trash2 className="w-3.5 h-3.5" />
+                <span>{t('common.delete')}</span>
               </button>
             </div>
           )}
@@ -236,37 +306,69 @@ export const S21_StudentDetailModal: React.FC<StudentDetailProps> = ({
 
           {activeTab === 'payments' && (
             <div className="space-y-3">
-              <div className="flex justify-between items-center bg-slate-50 p-3 rounded-xl border border-slate-200">
-                <span>{t('students.paidUntil')}: <strong>{formatDate(student.paidUntil)}</strong></span>
+              <div className="flex flex-wrap justify-between items-center gap-2 bg-slate-50 p-3 rounded-xl border border-slate-200">
                 <span>
-                  {t('students.debt')}:{' '}
-                  <strong className={student.debtAmount > 0 ? 'text-rose-600' : 'text-emerald-600'}>
-                    {formatCurrency(student.debtAmount)}
+                  {t('billing.totalPaid')}: <strong className="text-emerald-600">{formatCurrency(billingSummary.totalPaid)}</strong>
+                </span>
+                <span>
+                  {t('billing.remainingBalance')}:{' '}
+                  <strong className={billingSummary.remainingBalance > 0 ? 'text-rose-600' : 'text-emerald-600'}>
+                    {formatCurrency(billingSummary.remainingBalance)}
                   </strong>
                 </span>
+                <button
+                  type="button"
+                  onClick={() => setShowStatementModal(true)}
+                  className="px-2.5 py-1 bg-white hover:bg-slate-100 border border-slate-200 rounded-lg font-bold text-slate-700 inline-flex items-center gap-1 cursor-pointer"
+                >
+                  <Printer className="w-3.5 h-3.5 text-[#C6A15B]" />
+                  {t('billing.printStatement')}
+                </button>
               </div>
 
-              <div className="border border-slate-200 rounded-xl overflow-hidden">
+              <div className="border border-slate-200 rounded-xl overflow-x-auto">
                 <table className="w-full text-left text-xs">
-                  <thead className="bg-slate-50 font-bold border-b border-slate-200">
+                  <thead className="bg-slate-50 font-bold border-b border-slate-200 text-[10px] uppercase text-slate-500">
                     <tr>
-                      <th className="p-2.5">{t('common.date')}</th>
-                      <th className="p-2.5">{t('payments.period')}</th>
-                      <th className="p-2.5">{t('common.amount')}</th>
+                      <th className="p-2.5">{t('payments.paymentDate')}</th>
+                      <th className="p-2.5">{t('billing.itemLabel')}</th>
+                      <th className="p-2.5 text-right">{t('billing.amountPaid')}</th>
                       <th className="p-2.5">{t('payments.method')}</th>
+                      <th className="p-2.5">{t('payments.paidUntilLabel')}</th>
+                      <th className="p-2.5">{t('billing.notes')}</th>
                       <th className="p-2.5">{t('payments.recordedBy')}</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100">
-                    {stdPayments.map((p) => (
-                      <tr key={p.id}>
-                        <td className="p-2.5 font-semibold">{formatDate(p.paymentDate)}</td>
-                        <td className="p-2.5">{p.periodMonth}</td>
-                        <td className="p-2.5 font-bold text-slate-900">{formatCurrency(p.amount)}</td>
-                        <td className="p-2.5 capitalize">{t(`payments.method.${p.paymentMethod}`) || p.paymentMethod}</td>
-                        <td className="p-2.5">{p.recordedBy}</td>
+                    {stdPayments.length === 0 ? (
+                      <tr>
+                        <td colSpan={7} className="p-4 text-center text-slate-400">
+                          {t('common.noData')}
+                        </td>
                       </tr>
-                    ))}
+                    ) : (
+                      stdPayments.map((p) => (
+                        <tr key={p.id}>
+                          <td className="p-2.5 font-semibold tabular-nums whitespace-nowrap">
+                            {formatDateTimeCommaDisplay(p.paymentDate, p.paymentTime)}
+                          </td>
+                          <td className="p-2.5 whitespace-nowrap font-semibold">
+                            {formatPeriodLabel(p.periodMonth)}
+                          </td>
+                          <td className="p-2.5 text-right font-bold text-emerald-700 tabular-nums whitespace-nowrap">
+                            {formatCurrency(p.amount)}
+                          </td>
+                          <td className="p-2.5 whitespace-nowrap">
+                            {formatMethodLabel(p.paymentMethod, language)}
+                          </td>
+                          <td className="p-2.5 whitespace-nowrap tabular-nums text-slate-700 font-semibold">
+                            {formatShortDateDisplay(p.paidUntil)}
+                          </td>
+                          <td className="p-2.5 text-slate-500">{p.notes || '—'}</td>
+                          <td className="p-2.5">{p.recordedBy}</td>
+                        </tr>
+                      ))
+                    )}
                   </tbody>
                 </table>
               </div>
@@ -352,6 +454,63 @@ export const S21_StudentDetailModal: React.FC<StudentDetailProps> = ({
           )}
         </div>
       </div>
+
+      {showBillingEditor && (
+        <S53_BillingEditorModal
+          entityId={student.id}
+          onClose={() => setShowBillingEditor(false)}
+          onSaved={() => {
+            setSuccessToast(t('billing.savedToast'));
+            setTimeout(() => setSuccessToast(null), 4000);
+          }}
+        />
+      )}
+
+      {showStatementModal && (
+        <PaymentStatementModal
+          isOpen={showStatementModal}
+          onClose={() => setShowStatementModal(false)}
+          subject={{
+            fullName: student.fullName,
+            phone: student.phone,
+            passportNumber: student.passportNumber,
+            referenceNumber: stdContract?.contractNumber || student.applicationId,
+            roomLabel:
+              student.roomNumber && (student.bedIdentifier || student.bedNumber)
+                ? t('student.roomBedFormat', {
+                    room: student.roomNumber,
+                    bed: String(student.bedIdentifier || student.bedNumber),
+                  })
+                : student.roomNumber
+                ? `${t('common.room')} ${student.roomNumber}`
+                : t('student.awaitingRoom'),
+            floor: student.floor,
+            roomTypeLabel: billingSummary.roomType ? t(`rooms.${billingSummary.roomType}`) : undefined,
+            capacity: billingSummary.capacity,
+          }}
+          summary={billingSummary}
+          transactions={stdPayments}
+        />
+      )}
+
+      <ConfirmDeleteModal
+        isOpen={showDeleteConfirm}
+        title={t('students.confirmDeleteTitle')}
+        badgeText={student.fullName}
+        description={t('students.confirmDeleteDesc', { name: student.fullName })}
+        detailNote={
+          student.roomNumber
+            ? t('students.confirmDeleteBedRelease', {
+                room: student.roomNumber,
+                bed: String(student.bedIdentifier || student.bedNumber || '—'),
+              })
+            : t('students.confirmDeleteNoBed')
+        }
+        confirmLabel={t('common.delete')}
+        cancelLabel={t('common.cancel')}
+        onConfirm={handleConfirmDelete}
+        onCancel={() => setShowDeleteConfirm(false)}
+      />
     </div>
   );
 };

@@ -34,7 +34,7 @@ export const Header: React.FC<HeaderProps> = ({
   isStaffSession = false,
   onLogout,
 }) => {
-  const { role, setRole, currentUserName, notifications, markNotificationAsRead, students, rooms, issues, applications } = useDorm();
+  const { role, setRole, activeStaffUser, notifications, markNotificationAsRead, students, rooms, issues, applications } = useDorm();
   const { t } = useI18n();
   const [searchQuery, setSearchQuery] = useState('');
   const [showMobileSearch, setShowMobileSearch] = useState(false);
@@ -191,7 +191,7 @@ export const Header: React.FC<HeaderProps> = ({
                     className="w-full text-left px-2 py-1.5 hover:bg-slate-50 rounded-lg flex items-center justify-between cursor-pointer"
                   >
                     <span className="font-semibold text-slate-800">
-                      {t('common.room')} {rm.roomNumber} ({rm.type.toUpperCase()})
+                      {t('common.room')} {rm.roomNumber} ({t(`rooms.${rm.type}`)})
                     </span>
                     <span className="text-[11px] text-slate-500">
                       {rm.floor}-{t('common.floor')}
@@ -268,8 +268,20 @@ export const Header: React.FC<HeaderProps> = ({
         {/* Language Selector */}
         <LanguageSwitcher variant="header" />
 
-        {/* Dashboard / Role Selector (Staff session only; students see static Student badge) */}
-        {isStaffSession ? (
+        {/* Dashboard / Role Selector (Owner can switch roles; logged-in staff see their name & role badge; students see Student badge) */}
+        {isStaffSession && activeStaffUser ? (
+          <div className="flex items-center gap-2 bg-[#101C32] text-white px-2.5 sm:px-3 py-1.5 rounded-lg border border-[#C6A15B]/40 shadow-2xs min-h-[36px] max-w-[220px] sm:max-w-[280px]">
+            <ShieldCheck className="w-4 h-4 text-[#C6A15B] shrink-0" />
+            <div className="min-w-0 leading-tight">
+              <div className="font-bold text-[11px] sm:text-xs text-white truncate">
+                {activeStaffUser.fullName}
+              </div>
+              <div className="text-[10px] text-[#E5D5AA] font-semibold truncate">
+                {activeStaffUser.roleTitle}
+              </div>
+            </div>
+          </div>
+        ) : isStaffSession ? (
           <div ref={roleMenuRef} className="relative inline-block text-left">
             <button
               type="button"

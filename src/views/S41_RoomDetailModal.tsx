@@ -18,7 +18,7 @@ export const S41_RoomDetailModal: React.FC<RoomDetailProps> = ({
   onOpenAssignModal,
   onSelectStudent,
 }) => {
-  const { rooms, releaseBed, updateBed, role } = useDorm() as any;
+  const { rooms, students, releaseBed, updateBed, role } = useDorm() as any;
   const { t, formatCurrency, formatDate } = useI18n();
   const room = rooms.find((r: any) => r.id === roomId);
 
@@ -56,18 +56,18 @@ export const S41_RoomDetailModal: React.FC<RoomDetailProps> = ({
           }
           badge={
             <span
-              className={`text-xs font-bold px-2.5 py-0.5 rounded-full uppercase ${
+              className={`text-xs font-bold px-2.5 py-0.5 rounded-full ${
                 String(room.type).endsWith('_plus')
                   ? 'bg-[#101C32] text-[#EAD096] border border-[#C6A15B]/60'
                   : 'bg-sky-100 text-sky-900'
               }`}
             >
-              {t(`rooms.${room.type}`) || room.type} ({room.capacity} {t('rooms.bedsTotal')})
+              {t(`rooms.${room.type}`) || room.type} ({t('student.capacityBeds', { capacity: room.capacity })})
             </span>
           }
           subtitle={
             <span>
-              {room.floor}-{t('common.floor')} • {t('students.tariff')}: {formatCurrency(room.priceMonthly)} • {t('rooms.capacity')}: {room.capacity} {t('rooms.bedsTotal')}
+              {room.floor}-{t('common.floor')} • {t('students.tariff')}: {formatCurrency(room.priceMonthly)} • {t('student.roomCapacityLabel')}: {t('student.capacityBeds', { capacity: room.capacity })}
             </span>
           }
           onClose={handleDismiss}
@@ -144,20 +144,32 @@ export const S41_RoomDetailModal: React.FC<RoomDetailProps> = ({
 
                     <div className="mb-3">
                       {isOccupied ? (
-                        <div>
-                          <div
-                            onClick={() => {
-                              if (bed.studentId) onSelectStudent(bed.studentId);
-                            }}
-                            className="font-bold text-slate-900 hover:text-sky-600 cursor-pointer underline decoration-sky-300 transition-colors"
-                            title={t('students.studentDetails')}
-                          >
-                            {bed.studentName || t('common.user')}
-                          </div>
-                          <div className="text-[10px] text-slate-400 mt-0.5">
-                            {t('common.date')}: {formatDate(bed.assignedAt || '')}
-                          </div>
-                        </div>
+                        (() => {
+                          const assignedStd = (students || []).find((s: any) => s.id === bed.studentId);
+                          return (
+                            <div>
+                              <div className="flex items-center flex-wrap gap-1.5">
+                                <span
+                                  onClick={() => {
+                                    if (bed.studentId) onSelectStudent(bed.studentId);
+                                  }}
+                                  className="font-bold text-slate-900 hover:text-sky-600 cursor-pointer underline decoration-sky-300 transition-colors"
+                                  title={t('students.studentDetails')}
+                                >
+                                  {assignedStd?.fullName || bed.studentName || t('common.user')}
+                                </span>
+                                {assignedStd?.applicationId && (
+                                  <span className="font-mono text-[10px] font-bold bg-white/80 text-[#101C32] px-1.5 py-0.5 rounded border border-rose-200">
+                                    {assignedStd.applicationId}
+                                  </span>
+                                )}
+                              </div>
+                              <div className="text-[10px] text-slate-400 mt-0.5">
+                                {t('common.date')}: {formatDate(bed.assignedAt || '')}
+                              </div>
+                            </div>
+                          );
+                        })()
                       ) : isMaintenance ? (
                         <span className="text-amber-800 font-semibold flex items-center gap-1">
                           <Wrench className="w-3.5 h-3.5 text-amber-600" />

@@ -7,6 +7,7 @@ import { TelegramBotWidget } from './components/TelegramBotWidget';
 
 // Views
 import { RoomType } from './types';
+import { normalizePhoneKey } from './utils/authCrypto';
 import { S00_LandingPage } from './views/S00_LandingPage';
 import { S01_Login } from './views/S01_Login';
 import { S03_OnlineApplication } from './views/S03_OnlineApplication';
@@ -46,7 +47,7 @@ const clearStaffHash = () => {
 };
 
 const MainAppContent: React.FC = () => {
-  const { role, setRole, students } = useDorm();
+  const { role, setRole, setActiveStaffUser, students } = useDorm();
   const [activeView, setActiveView] = useState<string>(() =>
     isStaffHashActive() ? 'S01_StaffLogin' : 'S00_LandingPage'
   );
@@ -58,12 +59,13 @@ const MainAppContent: React.FC = () => {
     const onHashChange = () => {
       if (isStaffHashActive()) {
         setIsStaffSession(false);
+        setActiveStaffUser(null);
         setActiveView('S01_StaffLogin');
       }
     };
     window.addEventListener('hashchange', onHashChange);
     return () => window.removeEventListener('hashchange', onHashChange);
-  }, []);
+  }, [setActiveStaffUser]);
 
   const handleNavigate = (view: string) => {
     if (view === 'S00_LandingPage') {
@@ -75,9 +77,10 @@ const MainAppContent: React.FC = () => {
 
   const handleLogout = () => {
     setIsMobileMenuOpen(false);
+    setActiveStaffUser(null);
     if (isStaffSession) {
       setIsStaffSession(false);
-      setActiveView('S01_StaffLogin');
+      setActiveView(isStaffHashActive() ? 'S01_StaffLogin' : 'S01_Login');
       return;
     }
     setRole('student');
@@ -90,6 +93,7 @@ const MainAppContent: React.FC = () => {
   const [showAddStudentModal, setShowAddStudentModal] = useState(false);
   const [showAssignModal, setShowAssignModal] = useState(false);
   const [assignInitialStudentId, setAssignInitialStudentId] = useState<string | undefined>(undefined);
+  const [assignInitialRoomType, setAssignInitialRoomType] = useState<RoomType | undefined>(undefined);
   const [assignInitialRoomId, setAssignInitialRoomId] = useState<string | undefined>(undefined);
   const [assignInitialBedId, setAssignInitialBedId] = useState<string | undefined>(undefined);
   const [showAddPaymentModal, setShowAddPaymentModal] = useState(false);
@@ -117,7 +121,10 @@ const MainAppContent: React.FC = () => {
           if (selRole !== 'student') {
             setIsStaffSession(true);
             setRole(selRole);
-            setActiveView('S10_Dashboard');
+            if (selRole === 'security') setActiveView('S150_AccessControl');
+            else if (selRole === 'cleaner') setActiveView('S40_Rooms');
+            else if (selRole === 'receptionist') setActiveView('S20_Students');
+            else setActiveView('S10_Dashboard');
           } else {
             setIsStaffSession(false);
             setRole('student');
@@ -167,6 +174,7 @@ const MainAppContent: React.FC = () => {
         initialRoomType={applicationPrefillRoomType}
         onSubmitted={() => setActiveView('S00_LandingPage')}
         onBackToLogin={() => setActiveView('S00_LandingPage')}
+        onGoToLogin={() => setActiveView('S01_Login')}
       />
     );
   }
@@ -236,11 +244,18 @@ const MainAppContent: React.FC = () => {
       case 'S30_Applications':
         return (
           <S30_ApplicationsList
-            onOpenAssignModal={(appData) => {
+            onOpenAssignModal={(appData, resolvedStudentId) => {
+              const appPhoneKey = appData.phone ? normalizePhoneKey(appData.phone) : '';
               const matchingStd = students.find(
-                (s) => s.passportNumber === appData.passportNumber || s.fullName === appData.fullName
+                (s) =>
+                  (resolvedStudentId && s.id === resolvedStudentId) ||
+                  (appData.studentId && s.id === appData.studentId) ||
+                  (appData.passportNumber && s.passportNumber === appData.passportNumber) ||
+                  (appPhoneKey.length >= 7 && normalizePhoneKey(s.phone) === appPhoneKey) ||
+                  s.fullName === appData.fullName
               );
-              setAssignInitialStudentId(matchingStd?.id);
+              setAssignInitialStudentId(resolvedStudentId || matchingStd?.id);
+              setAssignInitialRoomType(appData.preferredRoomType);
               setShowAssignModal(true);
             }}
           />
@@ -250,8 +265,8 @@ const MainAppContent: React.FC = () => {
       case 'S50_Payments':
         return (
           <S50_PaymentsList
-            onOpenAddPaymentModal={() => {
-              setAddPaymentInitialStudentId(undefined);
+            onOpenAddPaymentModal={(stdId) => {
+              setAddPaymentInitialStudentId(stdId);
               setShowAddPaymentModal(true);
             }}
           />
@@ -377,13 +392,19 @@ const MainAppContent: React.FC = () => {
       {role !== 'security' && showAssignModal && (
         <S43_AssignTransferBedModal
           initialStudentId={assignInitialStudentId}
+          initialRoomType={assignInitialRoomType}
           initialRoomId={assignInitialRoomId}
           initialBedId={assignInitialBedId}
           onClose={() => {
             setShowAssignModal(false);
             setAssignInitialStudentId(undefined);
+            setAssignInitialRoomType(undefined);
             setAssignInitialRoomId(undefined);
             setAssignInitialBedId(undefined);
+          }}
+          onOpenAddPaymentModal={(stdId) => {
+            setAddPaymentInitialStudentId(stdId);
+            setShowAddPaymentModal(true);
           }}
         />
       )}
@@ -399,7 +420,13 @@ const MainAppContent: React.FC = () => {
       )}
 
       {role !== 'security' && showAddStudentModal && (
-        <S22_AddEditStudentModal onClose={() => setShowAddStudentModal(false)} />
+        <S22_AddEditStudentModal
+          onClose={() => setShowAddStudentModal(false)}
+          onOpenAddPaymentModal={(stdId) => {
+            setAddPaymentInitialStudentId(stdId);
+            setShowAddPaymentModal(true);
+          }}
+        />
       )}
     </div>
   );

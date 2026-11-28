@@ -126,7 +126,7 @@ export const TelegramBotWidget: React.FC = () => {
         `• ${t('common.floor')}: ${activeStudent?.floor || 2}-${t('common.floor')}\n` +
         `• ${t('common.room')}: ${activeStudent?.roomNumber ? `${t('common.room')} ${activeStudent.roomNumber}` : t('beds.available')}\n` +
         `• ${t('studentRoom.yourBed')}: ${activeStudent?.bedNumber || '-'}-${t('common.bed')}\n` +
-        `• ${t('contracts.tariff')}: ${activeStudent?.roomType?.toUpperCase() || 'COMFORT'}\n` +
+        `• ${t('contracts.tariff')}: ${activeStudent?.roomType ? t(`rooms.${activeStudent.roomType}`) : 'Comfort'}\n` +
         `• ${t('student.monthlyTariff')}: ${formatCurrency(activeStudent?.monthlyTariff || 0)}`
       );
     } else if (cmd.includes('To‘lov') || cmd.includes('Payment') || cmd.includes('Платеж')) {

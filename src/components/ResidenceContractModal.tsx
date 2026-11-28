@@ -2,6 +2,11 @@ import React, { useEffect } from 'react';
 import { createPortal } from 'react-dom';
 import { X, Printer, FileText, Check } from 'lucide-react';
 import { Language } from '../i18n/types';
+import {
+  StudentBillingSummary,
+  formatDateTimeCommaDisplay,
+  formatMethodLabel,
+} from '../utils/billingUtils';
 
 export interface ContractLiveStudentData {
   fullName: string;
@@ -14,14 +19,21 @@ export interface ContractLiveStudentData {
   group: string;
   roomTypeLabel: string;
   monthlyTariffText: string;
+  floor?: number | string;
+  roomCapacity?: number | string;
+  roomNumber?: string;
+  bedNumber?: string;
+  contractNumber?: string;
+  billingSummary?: StudentBillingSummary;
 }
 
 interface ResidenceContractModalProps {
   isOpen: boolean;
   onClose: () => void;
-  onAccept: () => void;
-  agreedToTerms: boolean;
-  onToggleAgreed: (checked: boolean) => void;
+  onAccept?: () => void;
+  agreedToTerms?: boolean;
+  onToggleAgreed?: (checked: boolean) => void;
+  isResidentMode?: boolean;
   language: Language;
   isLight: boolean;
   studentData: ContractLiveStudentData;
@@ -31,17 +43,17 @@ const BLANK = '__________';
 
 const ANNEX_1_ITEMS: Record<Language, string[]> = {
   uz: [
-    'Кровать',
+    'Каравот',
     'Матрас',
     'Ёстиқ / кўрпа',
-    'Шкаф',
+    'Жавон (шкаф)',
     'Стол',
     'Стул',
     'Тумбочка',
     'Кондиционер',
     'Ёритиш жиҳозлари',
-    'Калит / карта',
-    'Постель',
+    'Калит / кириш картаси',
+    'Чойшаб тўплами',
   ],
   ru: [
     'Кровать',
@@ -208,8 +220,9 @@ export const ResidenceContractModal: React.FC<ResidenceContractModalProps> = ({
   isOpen,
   onClose,
   onAccept,
-  agreedToTerms,
+  agreedToTerms = true,
   onToggleAgreed,
+  isResidentMode = false,
   language,
   isLight,
   studentData,
@@ -239,7 +252,6 @@ export const ResidenceContractModal: React.FC<ResidenceContractModalProps> = ({
   if (!isOpen || typeof document === 'undefined') return null;
 
   const ui = UI_TEXT[language] || UI_TEXT.uz;
-  const valOrBlank = (val?: string) => (val && val.trim().length > 0 ? val.trim() : BLANK);
 
   const Field: React.FC<{ value?: string; fallback?: string }> = ({ value, fallback = BLANK }) => {
     const clean = value?.trim();
@@ -289,6 +301,105 @@ export const ResidenceContractModal: React.FC<ResidenceContractModalProps> = ({
     isLight ? 'text-[#101C32]' : 'text-[#EAD096]'
   }`;
 
+  const renderAnnex3Rows = (docLang: Language) => {
+    const unit = docLang === 'ru' ? 'сум' : docLang === 'en' ? 'UZS' : 'сўм';
+    const formatAmt = (val: number) => `${val.toLocaleString('ru-RU')} ${unit}`;
+    const summary = studentData.billingSummary;
+
+    if (!summary) {
+      return annex3Months.map((month, idx) => (
+        <tr key={idx}>
+          <td className={`border p-1.5 ${tableBorderClass}`}>{month}</td>
+          <td className={`border p-1.5 tabular-nums ${tableBorderClass}`}>
+            <Field value={studentData.monthlyTariffText ? `${studentData.monthlyTariffText} ${unit}` : ''} />
+          </td>
+          <td className={`border p-1.5 ${tableBorderClass}`}></td>
+          <td className={`border p-1.5 ${tableBorderClass}`}></td>
+          <td className={`border p-1.5 ${tableBorderClass}`}></td>
+          <td className={`border p-1.5 ${tableBorderClass}`}></td>
+        </tr>
+      ));
+    }
+
+    const totalsLabel =
+      docLang === 'ru' ? 'ИТОГО' : docLang === 'en' ? 'TOTALS' : 'ЖАМИ';
+
+    return (
+      <>
+        {summary.months.map((row) => {
+          const monthName =
+            docLang === 'ru' ? row.labelRu : docLang === 'en' ? row.labelEn : row.labelUzCyrl;
+          const statusLabel =
+            docLang === 'ru'
+              ? row.status === 'paid'
+                ? 'Оплачено'
+                : row.status === 'partial'
+                ? 'Частично'
+                : row.isActiveMonth
+                ? 'К оплате'
+                : 'По графику'
+              : docLang === 'en'
+              ? row.status === 'paid'
+                ? 'Paid'
+                : row.status === 'partial'
+                ? 'Partial'
+                : row.isActiveMonth
+                ? 'Due'
+                : 'Scheduled'
+              : row.status === 'paid'
+              ? 'Тўланган'
+              : row.status === 'partial'
+              ? 'Қисман'
+              : row.isActiveMonth
+              ? 'Тўлов кутилмоқда'
+              : 'Режа асосида';
+          const methodLabel = row.paymentMethod
+            ? formatMethodLabel(row.paymentMethod, docLang === 'uz' ? 'uzCyrl' : docLang)
+            : '';
+          const noteCell = [statusLabel, methodLabel, row.notes].filter(Boolean).join(' · ');
+
+          return (
+            <tr key={row.period}>
+              <td className={`border p-1.5 ${tableBorderClass}`}>{monthName}</td>
+              <td className={`border p-1.5 tabular-nums ${tableBorderClass}`}>{formatAmt(row.rate)}</td>
+              <td className={`border p-1.5 tabular-nums whitespace-nowrap ${tableBorderClass}`}>
+                {formatDateTimeCommaDisplay(row.paymentDate)}
+              </td>
+              <td className={`border p-1.5 tabular-nums font-semibold ${tableBorderClass}`}>
+                {formatAmt(row.paidAmount)}
+              </td>
+              <td className={`border p-1.5 tabular-nums font-semibold ${tableBorderClass}`}>
+                {formatAmt(row.remainingAmount)}
+              </td>
+              <td className={`border p-1.5 ${tableBorderClass}`}>{noteCell}</td>
+            </tr>
+          );
+        })}
+
+        <tr className={`font-bold ${isLight ? 'bg-slate-100' : 'bg-slate-800/70'}`}>
+          <td className={`border p-1.5 uppercase ${tableBorderClass}`}>{totalsLabel}</td>
+          <td className={`border p-1.5 tabular-nums ${tableBorderClass}`}>
+            {formatAmt(summary.totalExpected)}
+          </td>
+          <td className={`border p-1.5 ${tableBorderClass}`}>—</td>
+          <td className={`border p-1.5 tabular-nums ${tableBorderClass}`}>
+            {formatAmt(summary.totalPaid)}
+          </td>
+          <td className={`border p-1.5 tabular-nums ${tableBorderClass}`}>
+            {formatAmt(summary.remainingBalance)}
+          </td>
+          <td className={`border p-1.5 ${tableBorderClass}`}>
+            {docLang === 'ru'
+              ? `Активных мес.: ${summary.activeMonthsCount}`
+              : docLang === 'en'
+              ? `Active months: ${summary.activeMonthsCount}`
+              : `Фаол ойлар: ${summary.activeMonthsCount}`}
+          </td>
+        </tr>
+      </>
+    );
+  };
+
   const bodyTextClass = `text-xs leading-relaxed print:text-black print:text-[11px] ${
     isLight ? 'text-slate-700' : 'text-slate-300'
   }`;
@@ -311,7 +422,7 @@ export const ResidenceContractModal: React.FC<ResidenceContractModalProps> = ({
               ДОГОВОР ПОЛЬЗОВАНИЯ И ПРОЖИВАНИЯ В СТУДЕНЧЕСКОЙ РЕЗИДЕНЦИИ
             </h2>
             <p className={`text-xs font-semibold print:text-black ${isLight ? 'text-slate-700' : 'text-slate-300'}`}>
-              № ____/26
+              № <Field value={studentData.contractNumber} fallback="____/26" />
             </p>
             <div className={`flex flex-wrap items-center justify-between gap-2 text-xs pt-1 print:text-black ${isLight ? 'text-slate-600' : 'text-slate-400'}`}>
               <span>г. Ташкент</span>
@@ -337,7 +448,7 @@ export const ResidenceContractModal: React.FC<ResidenceContractModalProps> = ({
             <p className={bodyTextClass}>1.1. Администрация предоставляет Студенту жилое место для временного проживания и пользования в студенческой резиденции.</p>
             <p className={bodyTextClass}>1.2. Адрес резиденции: г. Ташкент, Алмазарский район, МСГ Замондош, 1-й тупик Умид, дом 22/4.</p>
             <p className={bodyTextClass}>
-              1.3. Выделенная Студенту категория комнаты: <Field value={studentData.roomTypeLabel} />, комната № __________, койко-место № __________.
+              1.3. Выделенная Студенту категория комнаты: <Field value={studentData.roomTypeLabel} />, этаж: <Field value={studentData.floor !== undefined ? String(studentData.floor) : ''} fallback="____" />, комната № <Field value={studentData.roomNumber} fallback="__________" />, вместимость: <Field value={studentData.roomCapacity !== undefined ? `${studentData.roomCapacity}-местная` : ''} fallback="______" />, койко-место № <Field value={studentData.bedNumber} fallback="__________" />.
             </p>
             <p className={bodyTextClass}>1.4. Студент использует место исключительно для личного проживания и не вправе передавать его третьим лицам, сдавать в субаренду или постоянно размещать других лиц.</p>
           </div>
@@ -378,11 +489,11 @@ export const ResidenceContractModal: React.FC<ResidenceContractModalProps> = ({
           </div>
 
           <div className={paperSectionClass}>
-            <h3 className={headingClass}>6. ДЕПОЗИТ (ГАРАНТИЙНАЯ СУММА)</h3>
-            <p className={bodyTextClass}>6.1. Размер гарантийного депозита Студента составляет: 1 000 000 сум.</p>
-            <p className={bodyTextClass}>6.2. Депозит может использоваться для возмещения ущерба комнате, мебели, технике, санитарному оборудованию или иному имуществу, а также для погашения задолженности по договору.</p>
-            <p className={bodyTextClass}>6.3. При отсутствии ущерба и задолженности депозит возвращается Студенту в полном объеме в течение 3 рабочих дней после сдачи комнаты и окончательного расчета.</p>
-            <p className={bodyTextClass}>6.4. Удержание из депозита осуществляется на основании акта или расчета.</p>
+            <h3 className={headingClass}>6. ПОРЯДОК ПОДТВЕРЖДЕНИЯ ОПЛАТЫ И СРОК ДЕЙСТВИЯ</h3>
+            <p className={bodyTextClass}>6.1. Каждая ежемесячная оплата фиксируется в электронной системе учета с указанием точной даты, времени (ЧЧ:ММ) и способа оплаты (Наличные, Карта, Click, Payme или Банковский перевод).</p>
+            <p className={bodyTextClass}>6.2. Оплаченный период проживания действует 30 календарных дней с даты оплаты, если Сторонами не согласована иная дата окончания оплаченного срока.</p>
+            <p className={bodyTextClass}>6.3. Остаток оплаченных дней рассчитывается автоматически до установленной даты окончания оплаченного срока и отображается в личном кабинете Студента.</p>
+            <p className={bodyTextClass}>6.4. При досрочном расторжении договора или выезде окончательный взаиморасчет производится на основании акта приема-передачи комнаты и фактических платежей.</p>
           </div>
 
           <div className={paperSectionClass}>
@@ -498,9 +609,9 @@ export const ResidenceContractModal: React.FC<ResidenceContractModalProps> = ({
                       <p><strong>ID/паспорт:</strong> <Field value={studentData.passportNumber} /></p>
                       <p><strong>Телефон:</strong> <Field value={studentData.phone} /></p>
                       <p>
-                        <strong>Комната:</strong> <Field value={studentData.roomTypeLabel} /> (№ ______)
+                        <strong>Комната:</strong> <Field value={studentData.roomTypeLabel} /> (Этаж: <Field value={studentData.floor !== undefined ? String(studentData.floor) : ''} fallback="___" />, № <Field value={studentData.roomNumber} fallback="______" />, мест: <Field value={studentData.roomCapacity !== undefined ? String(studentData.roomCapacity) : ''} fallback="__" />)
                       </p>
-                      <p><strong>Место:</strong> № ______</p>
+                      <p><strong>Место:</strong> № <Field value={studentData.bedNumber} fallback="______" /></p>
                       <p className="pt-2"><strong>Подпись:</strong> ________________________</p>
                     </td>
                   </tr>
@@ -520,8 +631,8 @@ export const ResidenceContractModal: React.FC<ResidenceContractModalProps> = ({
             <div className={`${bodyTextClass} space-y-1`}>
               <p>
                 <strong>Студент:</strong> <Field value={studentData.fullName} /> &nbsp;&nbsp;
-                <strong>Категория / Комната №:</strong> <Field value={studentData.roomTypeLabel} /> / ______ &nbsp;&nbsp;
-                <strong>Место №:</strong> ______
+                <strong>Этаж / Комната №:</strong> <Field value={studentData.floor !== undefined ? String(studentData.floor) : ''} fallback="___" /> / <Field value={studentData.roomNumber} fallback="______" /> (<Field value={studentData.roomTypeLabel} />) &nbsp;&nbsp;
+                <strong>Место №:</strong> <Field value={studentData.bedNumber} fallback="______" />
               </p>
               <p><strong>Дата:</strong> {todayFormatted}</p>
             </div>
@@ -584,7 +695,7 @@ export const ResidenceContractModal: React.FC<ResidenceContractModalProps> = ({
             <div className={`${bodyTextClass} space-y-1 pb-1`}>
               <p>
                 <strong>Студент:</strong> <Field value={studentData.fullName} /> &nbsp;&nbsp;|&nbsp;&nbsp;
-                <strong>ID/паспорт / Договор №:</strong> <Field value={studentData.passportNumber} /> / ____/26
+                <strong>ID/паспорт / Договор №:</strong> <Field value={studentData.passportNumber} /> / <Field value={studentData.contractNumber} fallback="____/26" />
               </p>
               <p>
                 <strong>Выбранная комната и тариф:</strong> <Field value={studentData.roomTypeLabel} /> —{' '}
@@ -604,23 +715,12 @@ export const ResidenceContractModal: React.FC<ResidenceContractModalProps> = ({
                   </tr>
                 </thead>
                 <tbody>
-                  {annex3Months.map((month, idx) => (
-                    <tr key={idx}>
-                      <td className={`border p-1.5 ${tableBorderClass}`}>{month}</td>
-                      <td className={`border p-1.5 tabular-nums ${tableBorderClass}`}>
-                        <Field value={studentData.monthlyTariffText ? `${studentData.monthlyTariffText} сум` : ''} />
-                      </td>
-                      <td className={`border p-1.5 ${tableBorderClass}`}></td>
-                      <td className={`border p-1.5 ${tableBorderClass}`}></td>
-                      <td className={`border p-1.5 ${tableBorderClass}`}></td>
-                      <td className={`border p-1.5 ${tableBorderClass}`}></td>
-                    </tr>
-                  ))}
+                  {renderAnnex3Rows('ru')}
                 </tbody>
               </table>
             </div>
             <div className={`${bodyTextClass} space-y-1 pt-2`}>
-              <p><strong>Студент ID/договор №:</strong> <Field value={studentData.passportNumber} /></p>
+              <p><strong>Студент ID/договор №:</strong> <Field value={studentData.passportNumber} /> / <Field value={studentData.contractNumber} fallback="____/26" /></p>
               <p><strong>Ответственное лицо по учету:</strong> Абдусатторов А.А.</p>
             </div>
           </div>
@@ -637,7 +737,7 @@ export const ResidenceContractModal: React.FC<ResidenceContractModalProps> = ({
               STUDENT RESIDENCE USAGE &amp; ACCOMMODATION AGREEMENT
             </h2>
             <p className={`text-xs font-semibold print:text-black ${isLight ? 'text-slate-700' : 'text-slate-300'}`}>
-              No. ____/26
+              No. <Field value={studentData.contractNumber} fallback="____/26" />
             </p>
             <div className={`flex flex-wrap items-center justify-between gap-2 text-xs pt-1 print:text-black ${isLight ? 'text-slate-600' : 'text-slate-400'}`}>
               <span>Tashkent City</span>
@@ -665,7 +765,7 @@ export const ResidenceContractModal: React.FC<ResidenceContractModalProps> = ({
             <p className={bodyTextClass}>1.1. Administration provides the Student with an assigned residential space for temporary accommodation and use in the student residence.</p>
             <p className={bodyTextClass}>1.2. Residence address: 22/4 Umid 1st Passage, Zamondosh Mahalla, Olmazor District, Tashkent.</p>
             <p className={bodyTextClass}>
-              1.3. Assigned room category: <Field value={studentData.roomTypeLabel} />, Room No. __________, Bed No. __________.
+              1.3. Assigned room category: <Field value={studentData.roomTypeLabel} />, Floor: <Field value={studentData.floor !== undefined ? String(studentData.floor) : ''} fallback="____" />, Room No. <Field value={studentData.roomNumber} fallback="__________" />, Capacity: <Field value={studentData.roomCapacity !== undefined ? `${studentData.roomCapacity}-bed` : ''} fallback="______" />, Bed No. <Field value={studentData.bedNumber} fallback="__________" />.
             </p>
             <p className={bodyTextClass}>1.4. The Student shall use the space strictly for personal living purposes and may not transfer it to third parties, sublet it, or permanently accommodate other persons.</p>
           </div>
@@ -706,11 +806,11 @@ export const ResidenceContractModal: React.FC<ResidenceContractModalProps> = ({
           </div>
 
           <div className={paperSectionClass}>
-            <h3 className={headingClass}>6. SECURITY DEPOSIT</h3>
-            <p className={bodyTextClass}>6.1. The refundable security deposit amount is 1,000,000 UZS.</p>
-            <p className={bodyTextClass}>6.2. The deposit may cover damage to the room, furniture, appliances, plumbing, or property, as well as unpaid contractual balances.</p>
-            <p className={bodyTextClass}>6.3. Provided there is no damage or outstanding debt, the deposit is refunded in full to the Student within 3 business days after room handover and final settlement.</p>
-            <p className={bodyTextClass}>6.4. Deductions from the deposit are executed strictly based on an inspection act or settlement calculation.</p>
+            <h3 className={headingClass}>6. PAYMENT CONFIRMATION AND COVERAGE PERIOD</h3>
+            <p className={bodyTextClass}>6.1. Each monthly accommodation payment is recorded in the electronic billing system with the exact date, time (HH:MM), and payment method (Cash, Card, Click, Payme, or Bank Transfer).</p>
+            <p className={bodyTextClass}>6.2. Each paid accommodation period covers 30 calendar days from the payment date, unless another paid-through date is explicitly agreed by the Parties.</p>
+            <p className={bodyTextClass}>6.3. Remaining paid days are tracked automatically until the recorded paid-through date and are visible in the Student&apos;s personal cabinet.</p>
+            <p className={bodyTextClass}>6.4. Upon early termination or move-out, final settlement is carried out based on the room handover act and recorded monthly payments.</p>
           </div>
 
           <div className={paperSectionClass}>
@@ -825,8 +925,8 @@ export const ResidenceContractModal: React.FC<ResidenceContractModalProps> = ({
                       <p><strong>Full Name:</strong> <Field value={studentData.fullName} /></p>
                       <p><strong>ID / Passport:</strong> <Field value={studentData.passportNumber} /></p>
                       <p><strong>Phone:</strong> <Field value={studentData.phone} /></p>
-                      <p><strong>Room:</strong> <Field value={studentData.roomTypeLabel} /> (No. ______)</p>
-                      <p><strong>Bed:</strong> No. ______</p>
+                      <p><strong>Room:</strong> <Field value={studentData.roomTypeLabel} /> (Floor <Field value={studentData.floor !== undefined ? String(studentData.floor) : ''} fallback="___" />, No. <Field value={studentData.roomNumber} fallback="______" />, {studentData.roomCapacity !== undefined ? `${studentData.roomCapacity}-bed` : '___-bed'})</p>
+                      <p><strong>Bed:</strong> No. <Field value={studentData.bedNumber} fallback="______" /></p>
                       <p className="pt-2"><strong>Signature:</strong> ________________________</p>
                     </td>
                   </tr>
@@ -846,8 +946,8 @@ export const ResidenceContractModal: React.FC<ResidenceContractModalProps> = ({
             <div className={`${bodyTextClass} space-y-1`}>
               <p>
                 <strong>Student:</strong> <Field value={studentData.fullName} /> &nbsp;&nbsp;
-                <strong>Category / Room No.:</strong> <Field value={studentData.roomTypeLabel} /> / ______ &nbsp;&nbsp;
-                <strong>Bed No.:</strong> ______
+                <strong>Floor / Room No.:</strong> <Field value={studentData.floor !== undefined ? String(studentData.floor) : ''} fallback="___" /> / <Field value={studentData.roomNumber} fallback="______" /> (<Field value={studentData.roomTypeLabel} />) &nbsp;&nbsp;
+                <strong>Bed No.:</strong> <Field value={studentData.bedNumber} fallback="______" />
               </p>
               <p><strong>Date:</strong> {todayFormatted}</p>
             </div>
@@ -910,7 +1010,7 @@ export const ResidenceContractModal: React.FC<ResidenceContractModalProps> = ({
             <div className={`${bodyTextClass} space-y-1 pb-1`}>
               <p>
                 <strong>Student:</strong> <Field value={studentData.fullName} /> &nbsp;&nbsp;|&nbsp;&nbsp;
-                <strong>ID / Passport / Contract No.:</strong> <Field value={studentData.passportNumber} /> / ____/26
+                <strong>ID / Passport / Contract No.:</strong> <Field value={studentData.passportNumber} /> / <Field value={studentData.contractNumber} fallback="____/26" />
               </p>
               <p>
                 <strong>Selected Room &amp; Monthly Rate:</strong> <Field value={studentData.roomTypeLabel} /> —{' '}
@@ -930,23 +1030,12 @@ export const ResidenceContractModal: React.FC<ResidenceContractModalProps> = ({
                   </tr>
                 </thead>
                 <tbody>
-                  {annex3Months.map((month, idx) => (
-                    <tr key={idx}>
-                      <td className={`border p-1.5 ${tableBorderClass}`}>{month}</td>
-                      <td className={`border p-1.5 tabular-nums ${tableBorderClass}`}>
-                        <Field value={studentData.monthlyTariffText ? `${studentData.monthlyTariffText} UZS` : ''} />
-                      </td>
-                      <td className={`border p-1.5 ${tableBorderClass}`}></td>
-                      <td className={`border p-1.5 ${tableBorderClass}`}></td>
-                      <td className={`border p-1.5 ${tableBorderClass}`}></td>
-                      <td className={`border p-1.5 ${tableBorderClass}`}></td>
-                    </tr>
-                  ))}
+                  {renderAnnex3Rows('en')}
                 </tbody>
               </table>
             </div>
             <div className={`${bodyTextClass} space-y-1 pt-2`}>
-              <p><strong>Student ID / Contract No.:</strong> <Field value={studentData.passportNumber} /></p>
+              <p><strong>Student ID / Contract No.:</strong> <Field value={studentData.passportNumber} /> / <Field value={studentData.contractNumber} fallback="____/26" /></p>
               <p><strong>Accounting Officer:</strong> Abdusattorov A.A.</p>
             </div>
           </div>
@@ -963,7 +1052,7 @@ export const ResidenceContractModal: React.FC<ResidenceContractModalProps> = ({
             ТАЛАБАЛАР ТУРАР ЖОЙИДАН ФОЙДАЛАНИШ ВА ЯШАШ ШАРТНОМАСИ
           </h2>
           <p className={`text-xs font-semibold print:text-black ${isLight ? 'text-slate-700' : 'text-slate-300'}`}>
-            № ____/26
+            № <Field value={studentData.contractNumber} fallback="____/26" />
           </p>
           <div className={`flex flex-wrap items-center justify-between gap-2 text-xs pt-1 print:text-black ${isLight ? 'text-slate-600' : 'text-slate-400'}`}>
             <span>Тошкент шаҳри</span>
@@ -993,7 +1082,7 @@ export const ResidenceContractModal: React.FC<ResidenceContractModalProps> = ({
           <p className={bodyTextClass}>1.1. Маъмурият Талабага талабалар турар жойида вақтинча яшаш ва фойдаланиш учун белгиланган жойни тақдим этади.</p>
           <p className={bodyTextClass}>1.2. Турар жой манзили: Тошкент шаҳри, Олмазор тумани, Замондош МФЙ, Умид 1-тор кўчаси, 22/4-уй.</p>
           <p className={bodyTextClass}>
-            1.3. Талабага ажратилган хона тоифаси: <Field value={studentData.roomTypeLabel} />, хона № __________, ўрин/каравот № __________.
+            1.3. Талабага ажратилган хона тоифаси: <Field value={studentData.roomTypeLabel} />, қават: <Field value={studentData.floor !== undefined ? String(studentData.floor) : ''} fallback="____" />, хона № <Field value={studentData.roomNumber} fallback="__________" />, сиғими: <Field value={studentData.roomCapacity !== undefined ? `${studentData.roomCapacity} ўринли` : ''} fallback="______" />, ўрин/каравот № <Field value={studentData.bedNumber} fallback="__________" />.
           </p>
           <p className={bodyTextClass}>1.4. Талаба жойни фақат шахсий яшаш мақсадида ишлатади ва уни учинчи шахсга бериш, қайта ижарага топшириш ёки доимий равишда бошқа шахсни жойлаштиришга ҳақли эмас.</p>
         </div>
@@ -1007,7 +1096,7 @@ export const ResidenceContractModal: React.FC<ResidenceContractModalProps> = ({
 
         <div className={paperSectionClass}>
           <h3 className={headingClass}>3. ЁТОҚХОНАНИНГ МАЖБУРИЯТЛАРИ</h3>
-          <p className={bodyTextClass}>3.1. “Талаба”га ажратилган хонани барча анжомлар билан жиҳозлаш (стол-стул, кроват, чойшаблар, кийим жавони);</p>
+          <p className={bodyTextClass}>3.1. “Талаба”га ажратилган хонани барча анжомлар билан жиҳозлаш (стол-стул, каравот, чойшаблар, кийим жавони);</p>
           <p className={bodyTextClass}>3.2. Хонада қишки мавсумда иситиш тизими орқали керакли ҳароратни таъминлаш;</p>
           <p className={bodyTextClass}>3.3. Ёнғинга қарши воситалар билан таъминлаш;</p>
           <p className={bodyTextClass}>3.4. Санитария-эпидемиология назорати маркази талабларига жавоб берадиган шароит яратиш.</p>
@@ -1034,11 +1123,11 @@ export const ResidenceContractModal: React.FC<ResidenceContractModalProps> = ({
         </div>
 
         <div className={paperSectionClass}>
-          <h3 className={headingClass}>6. ДЕПОЗИТ (КАФОЛАТ ПУЛИ)</h3>
-          <p className={bodyTextClass}>6.1. Талабадан кафолат депозити миқдори: 1 000 000 сўм.</p>
-          <p className={bodyTextClass}>6.2. Депозит хона, мебель, техника, санитария жиҳозлари ёки бошқа мол-мулкка етказилган зарарни, шунингдек шартнома бўйича қарздорликни қоплаш учун ишлатилиши мумкин.</p>
-          <p className={bodyTextClass}>6.3. Зарар ёки қарздорлик бўлмаса, депозит хона топширилгандан ва якуний ҳисоб-китоб қилингандан сўнг 3 иш куни ичида Талабага тўлиқ қайтарилади.</p>
-          <p className={bodyTextClass}>6.4. Депозитдан ушлаб қолиш далолатнома ёки ҳисоб-китоб асосида амалга оширилади.</p>
+          <h3 className={headingClass}>6. ТЎЛОВНИ ТАСДИҚЛАШ ВА АМАЛ ҚИЛИШ МУДДАТИ</h3>
+          <p className={bodyTextClass}>6.1. Ҳар бир ойлик яшаш тўлови электрон ҳисоб тизимида аниқ сана, вақт (СС:ДД) ва тўлов усули (Нақд, Карта, Click, Payme ёки Банк ўтказмаси) кўрсатилган ҳолда қайд этилади.</p>
+          <p className={bodyTextClass}>6.2. Тўланган яшаш даври, агар Томонлар томонидан бошқа якуний сана келишилмаган бўлса, тўлов қилинган санадан бошлаб 30 календарь кун давомида амал қилади.</p>
+          <p className={bodyTextClass}>6.3. Тўлов тугашига қолган кунлар сони белгиланган якуний санагача автоматик тарзда ҳисобланади ва Талабанинг шахсий кабинетида акс этади.</p>
+          <p className={bodyTextClass}>6.4. Шартнома муддатидан олдин бекор қилинганда ёки кўчиб чиқилганда, якуний ҳисоб-китоб хонани топшириш далолатномаси ва амалга оширилган тўловлар асосида юритилади.</p>
         </div>
 
         <div className={paperSectionClass}>
@@ -1154,9 +1243,9 @@ export const ResidenceContractModal: React.FC<ResidenceContractModalProps> = ({
                     <p><strong>ID/паспорт:</strong> <Field value={studentData.passportNumber} /></p>
                     <p><strong>Телефон:</strong> <Field value={studentData.phone} /></p>
                     <p>
-                      <strong>Турар жой хонаси:</strong> <Field value={studentData.roomTypeLabel} /> (№ ______)
+                      <strong>Турар жой хонаси:</strong> <Field value={studentData.roomTypeLabel} /> (<Field value={studentData.floor !== undefined ? `${studentData.floor}-қават` : ''} fallback="___-қават" />, № <Field value={studentData.roomNumber} fallback="______" />, <Field value={studentData.roomCapacity !== undefined ? `${studentData.roomCapacity} ўринли` : ''} fallback="___ ўринли" />)
                     </p>
-                    <p><strong>Ўрин:</strong> № ______</p>
+                    <p><strong>Ўрин:</strong> № <Field value={studentData.bedNumber} fallback="______" /></p>
                     <p className="pt-2"><strong>Имзо:</strong> ________________________</p>
                   </td>
                 </tr>
@@ -1176,8 +1265,8 @@ export const ResidenceContractModal: React.FC<ResidenceContractModalProps> = ({
           <div className={`${bodyTextClass} space-y-1`}>
             <p>
               <strong>Талаба:</strong> <Field value={studentData.fullName} /> &nbsp;&nbsp;
-              <strong>Хона тоифаси / №:</strong> <Field value={studentData.roomTypeLabel} /> / ______ &nbsp;&nbsp;
-              <strong>Ўрин №:</strong> ______
+              <strong>Қават / Хона №:</strong> <Field value={studentData.floor !== undefined ? String(studentData.floor) : ''} fallback="___" /> / <Field value={studentData.roomNumber} fallback="______" /> (<Field value={studentData.roomTypeLabel} />) &nbsp;&nbsp;
+              <strong>Ўрин №:</strong> <Field value={studentData.bedNumber} fallback="______" />
             </p>
             <p><strong>Сана:</strong> {todayFormatted}</p>
           </div>
@@ -1240,7 +1329,7 @@ export const ResidenceContractModal: React.FC<ResidenceContractModalProps> = ({
           <div className={`${bodyTextClass} space-y-1 pb-1`}>
             <p>
               <strong>Талаба:</strong> <Field value={studentData.fullName} /> &nbsp;&nbsp;|&nbsp;&nbsp;
-              <strong>ID/паспорт / Шартнома №:</strong> <Field value={studentData.passportNumber} /> / ____/26
+              <strong>ID/паспорт / Шартнома №:</strong> <Field value={studentData.passportNumber} /> / <Field value={studentData.contractNumber} fallback="____/26" />
             </p>
             <p>
               <strong>Танланган хона ва ойлик тариф:</strong> <Field value={studentData.roomTypeLabel} /> —{' '}
@@ -1260,25 +1349,14 @@ export const ResidenceContractModal: React.FC<ResidenceContractModalProps> = ({
                 </tr>
               </thead>
               <tbody>
-                {annex3Months.map((month, idx) => (
-                  <tr key={idx}>
-                    <td className={`border p-1.5 ${tableBorderClass}`}>{month}</td>
-                    <td className={`border p-1.5 tabular-nums ${tableBorderClass}`}>
-                      <Field value={studentData.monthlyTariffText ? `${studentData.monthlyTariffText} сўм` : ''} />
-                    </td>
-                    <td className={`border p-1.5 ${tableBorderClass}`}></td>
-                    <td className={`border p-1.5 ${tableBorderClass}`}></td>
-                    <td className={`border p-1.5 ${tableBorderClass}`}></td>
-                    <td className={`border p-1.5 ${tableBorderClass}`}></td>
-                  </tr>
-                ))}
+                {renderAnnex3Rows('uz')}
               </tbody>
             </table>
           </div>
           <div className={`${bodyTextClass} space-y-1 pt-2`}>
             <p>
               <strong>Талаба ID / шартнома №:</strong>{' '}
-              <Field value={valOrBlank(studentData.passportNumber) === BLANK ? '' : `${studentData.passportNumber} / ____/26`} />
+              <Field value={studentData.passportNumber} /> / <Field value={studentData.contractNumber} fallback="____/26" />
             </p>
             <p><strong>Ҳисоб юритувчи масъул шахс:</strong> Абдусатторов А.А.</p>
           </div>
@@ -1367,17 +1445,19 @@ export const ResidenceContractModal: React.FC<ResidenceContractModalProps> = ({
             isLight ? 'border-slate-200 bg-white' : 'border-slate-800 bg-[#0E1729]'
           }`}
         >
-          <label className="flex items-start gap-2.5 cursor-pointer">
-            <input
-              type="checkbox"
-              checked={agreedToTerms}
-              onChange={(e) => onToggleAgreed(e.target.checked)}
-              className="mt-0.5 w-4 h-4 rounded border-slate-300 text-[#C6A15B] accent-[#C6A15B] focus:ring-[#C6A15B] shrink-0 cursor-pointer"
-            />
-            <span className={`text-xs font-medium leading-snug ${isLight ? 'text-slate-700' : 'text-slate-200'}`}>
-              {ui.consentLabel}
-            </span>
-          </label>
+          {!isResidentMode && (
+            <label className="flex items-start gap-2.5 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={agreedToTerms}
+                onChange={(e) => onToggleAgreed?.(e.target.checked)}
+                className="mt-0.5 w-4 h-4 rounded border-slate-300 text-[#C6A15B] accent-[#C6A15B] focus:ring-[#C6A15B] shrink-0 cursor-pointer"
+              />
+              <span className={`text-xs font-medium leading-snug ${isLight ? 'text-slate-700' : 'text-slate-200'}`}>
+                {ui.consentLabel}
+              </span>
+            </label>
+          )}
 
           <div className="flex flex-wrap items-center justify-between gap-2.5">
             <button
@@ -1405,14 +1485,16 @@ export const ResidenceContractModal: React.FC<ResidenceContractModalProps> = ({
               >
                 {ui.closeBtn}
               </button>
-              <button
-                type="button"
-                onClick={onAccept}
-                className="px-4 py-2 rounded-xl bg-gradient-to-r from-[#C6A15B] to-[#EAD096] hover:brightness-110 text-[#0A101D] font-bold text-xs shadow-md shadow-[#C6A15B]/20 transition-all cursor-pointer inline-flex items-center gap-1.5"
-              >
-                <Check className="w-3.5 h-3.5 stroke-[2.5]" />
-                <span>{ui.confirmBtn}</span>
-              </button>
+              {!isResidentMode && onAccept && (
+                <button
+                  type="button"
+                  onClick={onAccept}
+                  className="px-4 py-2 rounded-xl bg-gradient-to-r from-[#C6A15B] to-[#EAD096] hover:brightness-110 text-[#0A101D] font-bold text-xs shadow-md shadow-[#C6A15B]/20 transition-all cursor-pointer inline-flex items-center gap-1.5"
+                >
+                  <Check className="w-3.5 h-3.5 stroke-[2.5]" />
+                  <span>{ui.confirmBtn}</span>
+                </button>
+              )}
             </div>
           </div>
         </div>

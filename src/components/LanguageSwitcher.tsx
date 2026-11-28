@@ -7,12 +7,14 @@ interface LanguageSwitcherProps {
   variant?: 'header' | 'minimal' | 'dropdown' | 'segmented' | 'dark' | 'light';
   className?: string;
   dropdownDirection?: 'down' | 'up';
+  compact?: boolean;
 }
 
 export const LanguageSwitcher: React.FC<LanguageSwitcherProps> = ({
   variant = 'header',
   className = '',
   dropdownDirection = 'down',
+  compact = false,
 }) => {
   const { language, setLanguage } = useI18n();
   const [isOpen, setIsOpen] = useState(false);
@@ -93,34 +95,58 @@ export const LanguageSwitcher: React.FC<LanguageSwitcherProps> = ({
         aria-haspopup="listbox"
         aria-expanded={isOpen}
         aria-label="Tilni tanlash / Выбор языка / Select Language"
-        className={`flex items-center gap-1.5 sm:gap-2 rounded-xl text-xs transition-all cursor-pointer ${
+        className={`inline-flex items-center whitespace-nowrap rounded-xl text-xs transition-all cursor-pointer ${
+          compact ? 'w-[68px] h-9 px-2.5 justify-between gap-1' : 'gap-1.5 sm:gap-2'
+        } ${
           variant === 'dark'
-            ? 'bg-[#16233B]/80 hover:bg-[#1B2C4A] border border-slate-700/80 hover:border-[#C6A15B]/60 text-slate-200 h-8 sm:h-9 px-2.5 sm:px-3'
+            ? `bg-[#16233B]/80 hover:bg-[#1B2C4A] border border-slate-700/80 hover:border-[#C6A15B]/60 text-slate-200 ${
+                compact ? '' : 'h-8 sm:h-9 px-2.5 sm:px-3'
+              }`
             : variant === 'minimal'
-            ? 'bg-slate-800/60 hover:bg-slate-800/80 border border-slate-700/80 hover:border-[#C6A15B]/50 text-slate-200 backdrop-blur-md px-3 py-1.5 shadow-sm'
+            ? `bg-slate-800/60 hover:bg-slate-800/80 border border-slate-700/80 hover:border-[#C6A15B]/50 text-slate-200 backdrop-blur-md shadow-sm ${
+                compact ? '' : 'px-3 py-1.5'
+              }`
             : variant === 'light'
-            ? 'bg-slate-50 hover:bg-white text-[#0A101D] border border-slate-200 hover:border-[#C6A15B]/70 h-8 sm:h-9 px-2.5 sm:px-3'
+            ? `bg-slate-50 hover:bg-white text-[#0A101D] border border-slate-200 hover:border-[#C6A15B]/70 ${
+                compact ? '' : 'h-8 sm:h-9 px-2.5 sm:px-3'
+              }`
             : variant === 'header'
-            ? 'bg-white hover:bg-slate-50 text-slate-800 border border-slate-200 hover:border-slate-300 shadow-2xs px-2.5 py-1.5 min-h-[40px]'
-            : 'bg-white hover:bg-slate-50 text-slate-700 border border-slate-200 px-2.5 py-1.5'
+            ? `bg-white hover:bg-slate-50 text-slate-800 border border-slate-200 hover:border-slate-300 shadow-2xs ${
+                compact ? '' : 'px-2.5 py-1.5 min-h-[40px]'
+              }`
+            : `bg-white hover:bg-slate-50 text-slate-700 border border-slate-200 ${
+                compact ? '' : 'px-2.5 py-1.5'
+              }`
         }`}
       >
         <span
-          className={`font-mono text-[11px] font-bold tracking-wider uppercase rounded leading-none shrink-0 ${
-            variant === 'light'
-              ? 'text-[#A07A33] font-extrabold'
-              : variant === 'dark'
-              ? 'text-[#C6A15B] font-extrabold'
-              : isDark
-              ? 'bg-[#101C32] text-[#C6A15B] border border-[#C6A15B]/30 px-1.5 py-0.5'
-              : 'bg-[#101C32] text-[#C6A15B] px-1.5 py-0.5'
+          className={`font-mono font-bold tracking-wider uppercase leading-none shrink-0 ${
+            compact
+              ? variant === 'light'
+                ? 'text-xs text-[#856224]'
+                : variant === 'dark'
+                ? 'text-xs text-[#EAD096]'
+                : isDark
+                ? 'text-xs text-[#EAD096]'
+                : 'text-xs text-[#101C32]'
+              : `text-[11px] rounded ${
+                  variant === 'light'
+                    ? 'text-[#A07A33] font-extrabold'
+                    : variant === 'dark'
+                    ? 'text-[#C6A15B] font-extrabold'
+                    : isDark
+                    ? 'bg-[#101C32] text-[#C6A15B] border border-[#C6A15B]/30 px-1.5 py-0.5'
+                    : 'bg-[#101C32] text-[#C6A15B] px-1.5 py-0.5'
+                }`
           }`}
         >
           {currentOption.code.toUpperCase()}
         </span>
-        <span className={`hidden sm:inline font-sans text-xs font-semibold leading-none ${isDark ? 'text-slate-200' : 'text-slate-800'}`}>
-          {currentOption.nativeName}
-        </span>
+        {!compact && (
+          <span className={`hidden sm:inline font-sans text-xs font-semibold leading-none ${isDark ? 'text-slate-200' : 'text-slate-800'}`}>
+            {currentOption.nativeName}
+          </span>
+        )}
         <ChevronDown
           className={`w-3.5 h-3.5 transition-transform duration-150 shrink-0 ${
             variant === 'light' || variant === 'dark' ? 'text-[#C6A15B]' : 'text-slate-400'

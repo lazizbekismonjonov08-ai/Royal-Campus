@@ -14,9 +14,19 @@ import {
   ChevronLeft,
   ChevronRight,
   X,
+  Trash2,
 } from 'lucide-react';
 import { Student } from '../types';
 import { HighlightText } from '../components/HighlightText';
+import { ConfirmDeleteModal } from '../components/ConfirmDeleteModal';
+import { PaymentExpiryBadge } from '../components/PaymentExpiryBadge';
+import {
+  computePaymentExpiryInfo,
+  computeStudentBillingSummary,
+  findLinkedApplication,
+  formatShortDateDisplay,
+  isMonthlyPaymentRecord,
+} from '../utils/billingUtils';
 
 interface StudentsListProps {
   onSelectStudent: (id: string) => void;
@@ -29,18 +39,27 @@ export const S20_StudentsList: React.FC<StudentsListProps> = ({
   onOpenAddModal,
   onOpenAssignModal,
 }) => {
-  const { students, payments, role } = useDorm();
+  const {
+    students,
+    applications,
+    contracts,
+    rooms,
+    settings,
+    billingLedgers,
+    payments,
+    role,
+    deleteStudent,
+  } = useDorm();
   const { t, formatCurrency, formatDate } = useI18n();
   const [search, setSearch] = useState('');
   const [floorFilter, setFloorFilter] = useState<number | 'all'>('all');
   const [statusFilter, setStatusFilter] = useState<string>('active');
-  const [paymentFilter, setPaymentFilter] = useState<string>('all');
+  const [paymentFilter] = useState<string>('all');
   const [sortBy, setSortBy] = useState<'deadline' | 'overdue' | 'name'>('deadline');
   const [currentPage, setCurrentPage] = useState(1);
+  const [confirmDeleteStudent, setConfirmDeleteStudent] = useState<Student | null>(null);
+  const [deleteToast, setDeleteToast] = useState<string | null>(null);
   const ITEMS_PER_PAGE = 10;
-
-  // Configurable 7-day payment warning window
-  const WARNING_DAYS = 7;
 
   // 1. Eligible approved students awaiting bed assignment
   const unassignedStudents = useMemo(() => {
@@ -67,91 +86,55 @@ export const S20_StudentsList: React.FC<StudentsListProps> = ({
     });
   }, [students, search]);
 
-  // Map total completed payments for each student
-  const studentPaidMap = useMemo(() => {
-    const map = new Map<string, number>();
-    payments.forEach((p) => {
-      if (p.status === 'completed') {
-        map.set(p.studentId, (map.get(p.studentId) || 0) + p.amount);
+  // Precompute unified billing summary + expiry info per student
+  const studentBillingMap = useMemo(() => {
+    const monthlyPayments = payments.filter(isMonthlyPaymentRecord);
+    const map = new Map<
+      string,
+      {
+        summary: ReturnType<typeof computeStudentBillingSummary>;
+        expiry: ReturnType<typeof computePaymentExpiryInfo>;
       }
+    >();
+
+    students.forEach((s) => {
+      const linkedApp = findLinkedApplication(s, applications);
+      const activeCnt = contracts.find((c) => c.studentId === s.id && c.status === 'active');
+      const summary = computeStudentBillingSummary({
+        entityId: s.id,
+        student: s,
+        application: linkedApp,
+        contract: activeCnt,
+        rooms,
+        settings,
+        payments: monthlyPayments,
+        ledger: billingLedgers[s.id],
+      });
+      const expiry = computePaymentExpiryInfo(summary.paidUntilDate);
+      map.set(s.id, { summary, expiry });
     });
+
     return map;
-  }, [payments]);
+  }, [students, applications, contracts, rooms, settings, payments, billingLedgers]);
 
-  // Payment status & deadline ranking calculation
-  const getStudentPaymentInfo = (s: Student) => {
-    const now = new Date();
-    const deadlineStr = s.nextPaymentDate || s.nextPaymentDueDate || s.paidUntil;
+  const getStudentSortInfo = (s: Student) => {
+    const entry = studentBillingMap.get(s.id);
+    const expiry = entry?.expiry ?? computePaymentExpiryInfo(s.paidUntil);
+    const remainingBalance = entry?.summary.remainingBalance ?? s.debtAmount ?? 0;
 
-    // Rank 1: Overdue with debt
-    if (s.debtAmount > 0) {
-      let daysLate = 0;
-      let ts = 0;
-      if (deadlineStr) {
-        const d = new Date(deadlineStr);
-        ts = d.getTime();
-        daysLate = Math.max(1, Math.round((now.getTime() - d.getTime()) / (1000 * 60 * 60 * 24)));
-      }
-      return {
-        status: 'overdue' as const,
-        deadlineDate: deadlineStr || null,
-        daysRemaining: -daysLate,
-        sortRank: 1,
-        sortTimestamp: ts || 0,
-      };
-    }
+    let sortRank = 5;
+    if (expiry.status === 'overdue' || remainingBalance > 0) sortRank = 1;
+    else if (expiry.status === 'expiring_soon' && expiry.daysRemaining === 0) sortRank = 2;
+    else if (expiry.status === 'expiring_soon') sortRank = 3;
+    else if (expiry.status === 'active') sortRank = 4;
 
-    // Rank 5: No deadline information
-    if (!deadlineStr) {
-      return {
-        status: 'no_deadline' as const,
-        deadlineDate: null,
-        daysRemaining: null,
-        sortRank: 5,
-        sortTimestamp: Infinity,
-      };
-    }
-
-    const dueDate = new Date(deadlineStr);
-    const diffTime = dueDate.getTime() - now.getTime();
-    const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
-
-    // Rank 2: Passed deadline but no formal debt recorded yet -> Payment Due
-    if (diffDays < 0) {
-      return {
-        status: 'pending' as const,
-        deadlineDate: deadlineStr,
-        daysRemaining: diffDays,
-        sortRank: 2,
-        sortTimestamp: dueDate.getTime(),
-      };
-    }
-
-    // Rank 3: Deadline approaching within warning window (7 days)
-    if (diffDays <= WARNING_DAYS) {
-      return {
-        status: 'due_soon' as const,
-        deadlineDate: deadlineStr,
-        daysRemaining: diffDays,
-        sortRank: 3,
-        sortTimestamp: dueDate.getTime(),
-      };
-    }
-
-    // Rank 4: Settled and paid up
-    return {
-      status: 'paid' as const,
-      deadlineDate: deadlineStr,
-      daysRemaining: diffDays,
-      sortRank: 4,
-      sortTimestamp: dueDate.getTime(),
-    };
+    const sortDays = expiry.daysRemaining !== null ? expiry.daysRemaining : Number.POSITIVE_INFINITY;
+    return { sortRank, sortDays, remainingBalance };
   };
 
   // Filtered & sorted student list
   const sortedAndFilteredStudents = useMemo(() => {
     const filtered = students.filter((s) => {
-      // Search
       if (search.trim()) {
         const q = search.toLowerCase();
         const qClean = q.replace(/\s+/g, '');
@@ -170,15 +153,13 @@ export const S20_StudentsList: React.FC<StudentsListProps> = ({
         if (!matchName && !matchPass && !matchRoom && !matchPhone && !matchUniv && !matchGroup) return false;
       }
 
-      // Floor filter
       if (floorFilter !== 'all' && s.floor !== floorFilter) return false;
-
-      // Status filter
       if (statusFilter !== 'all' && s.status !== statusFilter) return false;
 
-      // Payment filter
-      if (paymentFilter === 'overdue' && s.debtAmount === 0) return false;
-      if (paymentFilter === 'paid' && s.debtAmount > 0) return false;
+      const billing = studentBillingMap.get(s.id);
+      const balance = billing?.summary.remainingBalance ?? s.debtAmount ?? 0;
+      if (paymentFilter === 'overdue' && balance === 0) return false;
+      if (paymentFilter === 'paid' && balance > 0) return false;
 
       return true;
     });
@@ -187,35 +168,47 @@ export const S20_StudentsList: React.FC<StudentsListProps> = ({
       if (sortBy === 'name') {
         return a.fullName.localeCompare(b.fullName);
       }
-      if (sortBy === 'overdue') {
-        if (a.debtAmount !== b.debtAmount) {
-          return b.debtAmount - a.debtAmount; // Largest debt first
-        }
+      const sortA = getStudentSortInfo(a);
+      const sortB = getStudentSortInfo(b);
+      if (sortBy === 'overdue' && sortA.remainingBalance !== sortB.remainingBalance) {
+        return sortB.remainingBalance - sortA.remainingBalance;
       }
-      // Default: 'deadline' (nearest unpaid deadline first)
-      const payA = getStudentPaymentInfo(a);
-      const payB = getStudentPaymentInfo(b);
-
-      if (payA.sortRank !== payB.sortRank) {
-        return payA.sortRank - payB.sortRank;
+      if (sortA.sortRank !== sortB.sortRank) {
+        return sortA.sortRank - sortB.sortRank;
       }
-      if (payA.sortTimestamp !== payB.sortTimestamp) {
-        return payA.sortTimestamp - payB.sortTimestamp;
+      if (sortA.sortDays !== sortB.sortDays) {
+        return sortA.sortDays - sortB.sortDays;
       }
       return a.fullName.localeCompare(b.fullName);
     });
-  }, [students, search, floorFilter, statusFilter, paymentFilter, sortBy]);
+  }, [students, studentBillingMap, search, floorFilter, statusFilter, paymentFilter, sortBy]);
 
   // Pagination calculation
   const totalPages = Math.ceil(sortedAndFilteredStudents.length / ITEMS_PER_PAGE) || 1;
+  const safePage = Math.min(currentPage, totalPages);
 
   const paginatedStudents = useMemo(() => {
-    const startIndex = (currentPage - 1) * ITEMS_PER_PAGE;
+    const startIndex = (safePage - 1) * ITEMS_PER_PAGE;
     return sortedAndFilteredStudents.slice(startIndex, startIndex + ITEMS_PER_PAGE);
-  }, [sortedAndFilteredStudents, currentPage]);
+  }, [sortedAndFilteredStudents, safePage]);
+
+  const handleConfirmDeleteResident = () => {
+    if (!confirmDeleteStudent) return;
+    const deletedName = confirmDeleteStudent.fullName;
+    deleteStudent(confirmDeleteStudent.id);
+    setConfirmDeleteStudent(null);
+    setDeleteToast(t('students.deletedToast', { name: deletedName }));
+    window.setTimeout(() => setDeleteToast(null), 4000);
+  };
 
   return (
     <div className="p-4 md:p-6 space-y-6 max-w-7xl mx-auto">
+      {deleteToast && (
+        <div className="fixed top-5 right-5 z-50 bg-[#101C32] text-white text-xs px-4 py-2.5 rounded-xl shadow-2xl border border-[#C6A15B] flex items-center gap-2">
+          <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+          <span className="font-semibold">{deleteToast}</span>
+        </div>
+      )}
       {/* Header */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 bg-white p-5 rounded-2xl border border-slate-200 shadow-2xs">
         <div>
@@ -251,7 +244,7 @@ export const S20_StudentsList: React.FC<StudentsListProps> = ({
               </div>
               <p className="text-xs text-slate-500">
                 {unassignedStudents.length > 0
-                  ? 'Yotoqxonaga tasdiqlangan, ammo xona va o‘rin biriktirilmagan talabalar'
+                  ? t('students.awaitingDesc')
                   : t('students.noAwaiting')}
               </p>
             </div>
@@ -312,16 +305,29 @@ export const S20_StudentsList: React.FC<StudentsListProps> = ({
                     </td>
                     <td className="p-3.5 text-slate-500">{formatDate(std.createdAt)}</td>
                     <td className="p-3.5 text-right">
-                      {role !== 'security' && onOpenAssignModal && (
-                        <button
-                          type="button"
-                          onClick={() => onOpenAssignModal(std.id)}
-                          className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold transition-all shadow-sm flex items-center justify-center gap-1.5 ml-auto cursor-pointer"
-                        >
-                          <Plus className="w-3.5 h-3.5" />
-                          {t('students.assignBed')}
-                        </button>
-                      )}
+                      <div className="flex items-center justify-end gap-1.5">
+                        {role !== 'security' && onOpenAssignModal && (
+                          <button
+                            type="button"
+                            onClick={() => onOpenAssignModal(std.id)}
+                            className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold transition-all shadow-sm inline-flex items-center justify-center gap-1.5 cursor-pointer"
+                          >
+                            <Plus className="w-3.5 h-3.5" />
+                            {t('students.assignBed')}
+                          </button>
+                        )}
+                        {role !== 'security' && (
+                          <button
+                            type="button"
+                            onClick={() => setConfirmDeleteStudent(std)}
+                            className="px-2.5 py-1.5 bg-rose-50 hover:bg-rose-600 text-rose-700 hover:text-white border border-rose-200 rounded-xl text-xs font-bold transition-colors inline-flex items-center gap-1 cursor-pointer"
+                            title={t('students.deleteResident')}
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                            <span>{t('common.delete')}</span>
+                          </button>
+                        )}
+                      </div>
                     </td>
                   </tr>
                 ))}
@@ -355,7 +361,7 @@ export const S20_StudentsList: React.FC<StudentsListProps> = ({
                   setCurrentPage(1);
                 }}
                 className="absolute right-2.5 top-2.5 text-slate-400 hover:text-slate-600 cursor-pointer"
-                title="Tozalash"
+                title={t('common.clearSearch')}
               >
                 <X className="w-4 h-4" />
               </button>
@@ -419,11 +425,10 @@ export const S20_StudentsList: React.FC<StudentsListProps> = ({
             <span className="flex items-center gap-1.5 flex-wrap">
               <span className="inline-block w-2 h-2 rounded-full bg-amber-400"></span>
               <span>
-                "{search}" qidiruvi bo‘yicha{' '}
-                <strong className="text-slate-900 font-bold">
-                  {sortedAndFilteredStudents.length}
-                </strong>{' '}
-                ta talaba topildi (mos kelgan matnlar sariq fonda belgilandi)
+                {t('students.searchSummary', {
+                  query: search,
+                  count: sortedAndFilteredStudents.length,
+                })}
               </span>
             </span>
             <button
@@ -434,7 +439,7 @@ export const S20_StudentsList: React.FC<StudentsListProps> = ({
               }}
               className="text-sky-600 hover:text-sky-700 font-semibold cursor-pointer text-left sm:text-right"
             >
-              Qidiruvni tozalash
+              {t('common.clearSearch')}
             </button>
           </div>
         )}
@@ -464,7 +469,7 @@ export const S20_StudentsList: React.FC<StudentsListProps> = ({
                       <div className="flex flex-col items-center justify-center gap-2">
                         <Search className="w-8 h-8 text-slate-300" />
                         <p className="text-sm font-semibold text-slate-600">
-                          "{search}" bo‘yicha talaba topilmadi
+                          {t('students.searchNoResults', { query: search })}
                         </p>
                         <button
                           type="button"
@@ -474,7 +479,7 @@ export const S20_StudentsList: React.FC<StudentsListProps> = ({
                           }}
                           className="mt-1 text-xs text-sky-600 hover:text-sky-700 font-bold underline cursor-pointer"
                         >
-                          Qidiruvni tozalash
+                          {t('common.clearSearch')}
                         </button>
                       </div>
                     ) : (
@@ -484,9 +489,13 @@ export const S20_StudentsList: React.FC<StudentsListProps> = ({
                 </tr>
               ) : (
                 paginatedStudents.map((std) => {
-                  const payInfo = getStudentPaymentInfo(std);
-                  const totalPaid = studentPaidMap.get(std.id) || 0;
-                  const hasDebt = std.debtAmount > 0;
+                  const billing = studentBillingMap.get(std.id);
+                  const summary = billing?.summary;
+                  const monthlyRate = summary?.monthlyRate ?? std.monthlyTariff;
+                  const totalPaid = summary?.totalPaid ?? 0;
+                  const remainingBalance = summary?.remainingBalance ?? std.debtAmount ?? 0;
+                  const paidUntilDate = summary?.paidUntilDate ?? std.paidUntil;
+                  const hasDebt = remainingBalance > 0;
 
                   return (
                     <tr key={std.id} className="hover:bg-slate-50 transition-colors">
@@ -511,86 +520,59 @@ export const S20_StudentsList: React.FC<StudentsListProps> = ({
                         {std.roomNumber ? (
                           <div>
                             <span className="font-bold text-sky-700">
-                              {t('common.room')}{' '}
-                              <HighlightText text={std.roomNumber} query={search} />
+                              {(std.bedIdentifier || std.bedNumber) ? (
+                                t('student.roomBedFormat', {
+                                  room: std.roomNumber,
+                                  bed: String(std.bedIdentifier || std.bedNumber),
+                                })
+                              ) : (
+                                <>
+                                  {t('common.room')}{' '}
+                                  <HighlightText text={std.roomNumber} query={search} />
+                                </>
+                              )}
                             </span>
                             <span className="text-[10px] text-slate-500 block">
-                              {std.floor}-{t('common.floor')} •{' '}
-                              <HighlightText text={std.bedNumber} query={search} />-{t('common.bed')} ({std.roomType?.toUpperCase()})
+                              {std.floor}-{t('common.floor')}
+                              {std.roomType ? ` · ${t(`rooms.${std.roomType}`)}` : ''}
                             </span>
                           </div>
                         ) : (
-                          <span className="text-amber-600 font-semibold text-[11px]">{t('beds.available')}</span>
+                          <span className="text-amber-600 font-semibold text-[11px]">{t('student.awaitingRoom')}</span>
                         )}
                       </td>
 
                       {/* Monthly Tariff */}
-                      <td className="p-3.5 font-bold text-slate-700">
-                        {formatCurrency(std.monthlyTariff)}
+                      <td className="p-3.5 font-bold text-slate-700 tabular-nums whitespace-nowrap">
+                        {formatCurrency(monthlyRate)}
                       </td>
 
                       {/* Amount Paid */}
-                      <td className="p-3.5 font-semibold text-emerald-600">
+                      <td className="p-3.5 font-semibold text-emerald-600 tabular-nums whitespace-nowrap">
                         {formatCurrency(totalPaid)}
                       </td>
 
                       {/* Outstanding Balance / Debt */}
-                      <td className="p-3.5">
+                      <td className="p-3.5 whitespace-nowrap">
                         {hasDebt ? (
-                          <span className="font-bold text-rose-600">
-                            {formatCurrency(std.debtAmount)}
+                          <span className="font-bold text-rose-600 tabular-nums">
+                            {formatCurrency(remainingBalance)}
                           </span>
                         ) : (
                           <span className="text-emerald-600 font-semibold">{t('student.noDebt')}</span>
                         )}
                       </td>
 
-                      {/* Payment Deadline ("To‘lov muddati") */}
-                      <td className="p-3.5">
-                        {payInfo.deadlineDate ? (
-                          <div>
-                            <div className="font-semibold text-slate-800">
-                              {formatDate(payInfo.deadlineDate)}
-                            </div>
-                            {payInfo.status === 'overdue' && payInfo.daysRemaining !== null && (
-                              <span className="text-[10px] font-bold text-rose-600 block">
-                                {t('students.daysOverdue', { days: Math.abs(payInfo.daysRemaining) })}
-                              </span>
-                            )}
-                            {payInfo.status === 'due_soon' && payInfo.daysRemaining !== null && (
-                              <span className="text-[10px] font-bold text-amber-600 block">
-                                {t('students.daysLeft', { days: payInfo.daysRemaining })}
-                              </span>
-                            )}
-                          </div>
-                        ) : (
-                          <span className="text-slate-400 text-[11px]">---</span>
-                        )}
+                      {/* Paid-Through Date */}
+                      <td className="p-3.5 whitespace-nowrap">
+                        <div className="font-semibold text-slate-800 tabular-nums">
+                          {formatShortDateDisplay(paidUntilDate)}
+                        </div>
                       </td>
 
-                      {/* 4 Required Status Indicators */}
-                      <td className="p-3.5">
-                        {payInfo.status === 'overdue' ? (
-                          <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-bold bg-rose-50 text-rose-700 border border-rose-200">
-                            <AlertTriangle className="w-3 h-3 text-rose-600 shrink-0" />
-                            {t('students.status.overdue')}
-                          </span>
-                        ) : payInfo.status === 'due_soon' ? (
-                          <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-bold bg-amber-50 text-amber-700 border border-amber-200">
-                            <Clock className="w-3 h-3 text-amber-600 shrink-0" />
-                            {t('students.status.dueSoon')}
-                          </span>
-                        ) : payInfo.status === 'pending' ? (
-                          <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-bold bg-sky-50 text-sky-700 border border-sky-200">
-                            <Clock className="w-3 h-3 text-sky-600 shrink-0" />
-                            {t('students.status.pendingPayment')}
-                          </span>
-                        ) : (
-                          <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-bold bg-emerald-50 text-emerald-700 border border-emerald-200">
-                            <CheckCircle2 className="w-3 h-3 text-emerald-600 shrink-0" />
-                            {t('students.status.paid')}
-                          </span>
-                        )}
+                      {/* Live Days Remaining Badge */}
+                      <td className="p-3.5 whitespace-nowrap">
+                        <PaymentExpiryBadge paidUntilDate={paidUntilDate} compact />
                       </td>
 
                       {/* Actions */}
@@ -612,6 +594,17 @@ export const S20_StudentsList: React.FC<StudentsListProps> = ({
                           >
                             {t('common.details')}
                           </button>
+                          {role !== 'security' && (
+                            <button
+                              type="button"
+                              onClick={() => setConfirmDeleteStudent(std)}
+                              className="px-2.5 py-1 bg-rose-50 hover:bg-rose-600 text-rose-700 hover:text-white border border-rose-200 rounded-lg text-xs font-semibold transition-colors inline-flex items-center gap-1 cursor-pointer"
+                              title={t('students.deleteResident')}
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                              <span>{t('common.delete')}</span>
+                            </button>
+                          )}
                         </div>
                       </td>
                     </tr>
@@ -627,13 +620,13 @@ export const S20_StudentsList: React.FC<StudentsListProps> = ({
           <div className="p-4 bg-slate-50 border-t border-slate-200 flex flex-col sm:flex-row items-center justify-between gap-3 text-xs text-slate-600">
             <span>
               {t('common.total')}: <strong className="text-slate-900">{sortedAndFilteredStudents.length}</strong> {t('nav.students').toLowerCase()} (
-              {currentPage} / {totalPages} {t('common.next').toLowerCase()})
+              {safePage} / {totalPages} {t('common.page')})
             </span>
             <div className="flex items-center gap-1.5">
               <button
                 type="button"
                 onClick={() => setCurrentPage((prev) => Math.max(prev - 1, 1))}
-                disabled={currentPage === 1}
+                disabled={safePage === 1}
                 aria-label="Previous Page"
                 className="p-2 rounded-xl border border-slate-200 bg-white hover:bg-slate-100 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer transition-colors shadow-2xs"
               >
@@ -645,7 +638,7 @@ export const S20_StudentsList: React.FC<StudentsListProps> = ({
                   .filter((page) => {
                     if (totalPages <= 7) return true;
                     if (page === 1 || page === totalPages) return true;
-                    return Math.abs(page - currentPage) <= 1;
+                    return Math.abs(page - safePage) <= 1;
                   })
                   .reduce<(number | string)[]>((acc, page, idx, arr) => {
                     if (idx > 0 && page - (arr[idx - 1] as number) > 1) {
@@ -663,7 +656,7 @@ export const S20_StudentsList: React.FC<StudentsListProps> = ({
                       );
                     }
                     const pageNum = item as number;
-                    const isActive = currentPage === pageNum;
+                    const isActive = safePage === pageNum;
                     return (
                       <button
                         key={pageNum}
@@ -684,7 +677,7 @@ export const S20_StudentsList: React.FC<StudentsListProps> = ({
               <button
                 type="button"
                 onClick={() => setCurrentPage((prev) => Math.min(prev + 1, totalPages))}
-                disabled={currentPage === totalPages}
+                disabled={safePage === totalPages}
                 aria-label="Next Page"
                 className="p-2 rounded-xl border border-slate-200 bg-white hover:bg-slate-100 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer transition-colors shadow-2xs"
               >
@@ -694,6 +687,29 @@ export const S20_StudentsList: React.FC<StudentsListProps> = ({
           </div>
         )}
       </div>
+
+      <ConfirmDeleteModal
+        isOpen={Boolean(confirmDeleteStudent)}
+        title={t('students.confirmDeleteTitle')}
+        badgeText={confirmDeleteStudent?.fullName}
+        description={t('students.confirmDeleteDesc', {
+          name: confirmDeleteStudent?.fullName || '',
+        })}
+        detailNote={
+          confirmDeleteStudent?.roomNumber
+            ? t('students.confirmDeleteBedRelease', {
+                room: confirmDeleteStudent.roomNumber,
+                bed: String(
+                  confirmDeleteStudent.bedIdentifier || confirmDeleteStudent.bedNumber || '—'
+                ),
+              })
+            : t('students.confirmDeleteNoBed')
+        }
+        confirmLabel={t('common.delete')}
+        cancelLabel={t('common.cancel')}
+        onConfirm={handleConfirmDeleteResident}
+        onCancel={() => setConfirmDeleteStudent(null)}
+      />
     </div>
   );
 };

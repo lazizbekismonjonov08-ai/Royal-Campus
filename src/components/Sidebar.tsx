@@ -46,7 +46,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
   isStaffSession = false,
   onLogout,
 }) => {
-  const { role, setRole, currentUserName } = useDorm();
+  const { role, setRole, currentUserName, activeStaffUser } = useDorm();
   const { t } = useI18n();
 
   const isStudent = role === 'student';
@@ -121,7 +121,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
       id: 'S80_Employees',
       labelKey: 'nav.employees',
       icon: UserCheck,
-      roles: ['owner', 'manager'],
+      roles: ['owner'],
     },
     {
       id: 'S90_Issues',
@@ -203,7 +203,11 @@ export const Sidebar: React.FC<SidebarProps> = ({
 
   const visibleItems = isStudent
     ? studentNavItems
-    : navItems.filter((item) => item.roles.includes(role));
+    : navItems.filter(
+        (item) =>
+          item.roles.includes(role) &&
+          !(activeStaffUser && (item.id === 'S80_Employees' || item.id === 'S130_Settings' || item.id === 'S140_AuditLog'))
+      );
 
   const renderNavList = (isDrawer = false) => (
     <div className="p-3 space-y-1">
@@ -247,8 +251,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
             <LanguageSwitcher variant="minimal" dropdownDirection="up" />
           </div>
 
-          {/* Mobile Drawer Role Switcher (Staff session only) */}
-          {isStaffSession && (
+          {/* Mobile Drawer Role Switcher (Owner session only) */}
+          {isStaffSession && !activeStaffUser && (
             <div className="py-2 border-t border-[#1A2D4F] space-y-1.5">
               <div className="flex items-center justify-between">
                 <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider">{t('header.roleSelect')}:</span>
@@ -337,14 +341,18 @@ export const Sidebar: React.FC<SidebarProps> = ({
         )}
       </div>
 
-      {isDrawer && (
+      {(isDrawer || Boolean(activeStaffUser)) && (
         <div className="pt-2 border-t border-[#1A2D4F] flex items-center gap-2.5 px-1">
           <div className="w-8 h-8 rounded-full bg-[#0A1220] text-[#C6A15B] border border-[#C6A15B]/40 flex items-center justify-center font-bold text-xs shrink-0">
-            {currentUserName ? currentUserName.charAt(0) : 'U'}
+            {(activeStaffUser ? activeStaffUser.fullName : currentUserName || 'U').charAt(0).toUpperCase()}
           </div>
           <div className="min-w-0 flex-1">
-            <div className="text-xs font-semibold text-slate-200 truncate">{currentUserName}</div>
-            <div className="text-[10px] text-[#C6A15B] font-semibold">{t(`role.${role}`)}</div>
+            <div className="text-xs font-semibold text-slate-200 truncate">
+              {activeStaffUser ? activeStaffUser.fullName : currentUserName}
+            </div>
+            <div className="text-[10px] text-[#C6A15B] font-semibold truncate">
+              {activeStaffUser ? activeStaffUser.roleTitle : t(`role.${role}`)}
+            </div>
           </div>
         </div>
       )}

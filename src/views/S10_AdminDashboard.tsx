@@ -14,6 +14,7 @@ import {
 } from 'recharts';
 import { useDorm } from '../context/DormContext';
 import { useI18n } from '../i18n/I18nContext';
+import { extractDatePart } from '../utils/billingUtils';
 import {
   BedDouble,
   TrendingUp,
@@ -25,6 +26,9 @@ import {
   Building,
   DollarSign,
   Info,
+  RotateCcw,
+  CheckCircle2,
+  KeyRound,
 } from 'lucide-react';
 import { PaymentDeadlineNotification } from '../components/PaymentDeadlineNotification';
 import { DashboardTasksWidget } from '../components/DashboardTasksWidget';
@@ -41,7 +45,7 @@ export const S10_AdminDashboard: React.FC<AdminDashboardProps> = ({
   onSelectStudent,
   onOpenAddPaymentModal,
 }) => {
-  const { stats, applications, issues, students, rooms, payments, setRoomFilter, contracts } = useDorm();
+  const { stats, applications, issues, students, rooms, payments, setRoomFilter, contracts, role, activeStaffUser, staffUsers, resetAllBedsToAvailable } = useDorm();
   const { t, formatCurrency, formatNumber, formatPercent } = useI18n();
 
   const handleRoomFilterClick = (filterType: string) => {
@@ -58,22 +62,22 @@ export const S10_AdminDashboard: React.FC<AdminDashboardProps> = ({
   const setActiveView = (view: string) => onNavigate(view);
   const [showFullTasks, setShowFullTasks] = useState(false);
   const [showFullAi, setShowFullAi] = useState(false);
+  const [confirmResetBeds, setConfirmResetBeds] = useState(false);
+  const [resetFeedback, setResetFeedback] = useState<string | null>(null);
 
   const pendingMaintenanceCount = useMemo(() => {
-    const count = (issues || []).filter((i) => i.status !== 'resolved').length;
-    return count > 0 ? count : 4;
+    return (issues || []).filter((i) => i.status !== 'resolved').length;
   }, [issues]);
 
   const upcomingRenewalsCount = useMemo(() => {
     const now = new Date();
-    const count = (contracts || []).filter((c) => {
+    return (contracts || []).filter((c) => {
       if (c.status === 'active' && c.endDate) {
         const diff = Math.ceil((new Date(c.endDate).getTime() - now.getTime()) / (1000 * 60 * 60 * 24));
         return diff >= 0 && diff <= 30;
       }
       return false;
     }).length;
-    return count > 0 ? count : 3;
   }, [contracts]);
 
   const totalTasksCount = pendingMaintenanceCount + upcomingRenewalsCount;
@@ -95,71 +99,74 @@ export const S10_AdminDashboard: React.FC<AdminDashboardProps> = ({
     if (roomChartMetric === 'beds') {
       return [
         {
-          name: 'Band o‘rinlar',
+          name: t('beds.occupied'),
           key: 'occupied',
           value: occBeds,
           percentage: Math.round((occBeds / totalBeds) * 100),
           color: '#0284c7',
           filterType: 'occupied',
-          subText: `${occupied} ta band xonada`,
-          bedsLabel: `${Math.round((occBeds / totalBeds) * 100)}% jami o‘rinlardan`,
+          subText: t('dashboard.occupiedInRoomsSub', { rooms: occupied }),
+          bedsLabel: t('dashboard.pctOfTotalBeds', { pct: Math.round((occBeds / totalBeds) * 100) }),
         },
         {
-          name: 'Bo‘sh o‘rinlar',
+          name: t('beds.available'),
           key: 'empty',
           value: availBeds,
           percentage: Math.round((availBeds / totalBeds) * 100),
           color: '#10b981',
           filterType: 'empty',
-          subText: 'Joylashishga tayyor o‘rinlar',
-          bedsLabel: `${empty} ta bo‘sh xonada`,
+          subText: t('dashboard.readyBedsSub'),
+          bedsLabel: t('dashboard.inEmptyRooms', { rooms: empty }),
         },
         {
-          name: 'Ta’mirdagi o‘rinlar',
+          name: t('beds.maintenance'),
           key: 'maintenance',
           value: maintBeds,
           percentage: Math.round((maintBeds / totalBeds) * 100),
           color: '#f59e0b',
           filterType: 'maintenance',
-          subText: 'Ta’mir talab o‘rinlar',
-          bedsLabel: `${maintenance} ta xonada`,
+          subText: t('dashboard.repairBedsSub'),
+          bedsLabel: t('dashboard.inRoomsCount', { rooms: maintenance }),
         },
       ];
     }
 
     return [
       {
-        name: 'Band xonalar',
+        name: t('dashboard.occupiedRooms'),
         key: 'occupied',
         value: occupied,
         percentage: Math.round((occupied / totalRooms) * 100),
         color: '#0284c7',
         filterType: 'occupied',
-        subText: `${stats.fullRooms} to‘liq band • ${stats.partiallyOccupiedRooms} qisman band`,
-        bedsLabel: `${occBeds} band o‘rinlar`,
+        subText: t('dashboard.fullPartialSub', {
+          full: stats.fullRooms,
+          partial: stats.partiallyOccupiedRooms,
+        }),
+        bedsLabel: `${occBeds} ${t('beds.occupied').toLowerCase()}`,
       },
       {
-        name: 'Bo‘sh xonalar',
+        name: t('dashboard.emptyRooms'),
         key: 'empty',
         value: empty,
         percentage: Math.round((empty / totalRooms) * 100),
         color: '#10b981',
         filterType: 'empty',
-        subText: 'Barcha o‘rinlari bo‘sh va tayyor',
-        bedsLabel: `${availBeds} bo‘sh o‘rinlar`,
+        subText: t('dashboard.allBedsReadySub'),
+        bedsLabel: `${availBeds} ${t('beds.available').toLowerCase()}`,
       },
       {
-        name: 'Ta’mirdagi xonalar',
+        name: t('dashboard.maintenanceRooms'),
         key: 'maintenance',
         value: maintenance,
         percentage: Math.round((maintenance / totalRooms) * 100),
         color: '#f59e0b',
         filterType: 'maintenance',
-        subText: 'Ta’mirda yoki xizmat ko‘rsatishda',
-        bedsLabel: `${maintBeds} ta’mirdagi o‘rinlar`,
+        subText: t('dashboard.underMaintenanceSub'),
+        bedsLabel: `${maintBeds} ${t('beds.maintenance').toLowerCase()}`,
       },
     ];
-  }, [stats, roomChartMetric]);
+  }, [stats, roomChartMetric, t]);
 
   // Mini sparkline data: Daily revenue trend for recent days using Recharts
   const dailyRevenueTrend = useMemo(() => {
@@ -167,7 +174,7 @@ export const S10_AdminDashboard: React.FC<AdminDashboardProps> = ({
     const dayMap = new Map<string, number>();
 
     completed.forEach((p) => {
-      const dateKey = p.paymentDate ? p.paymentDate.split(' ')[0] : '';
+      const dateKey = extractDatePart(p.paymentDate);
       if (dateKey) {
         dayMap.set(dateKey, (dayMap.get(dateKey) || 0) + p.amount);
       }
@@ -189,8 +196,8 @@ export const S10_AdminDashboard: React.FC<AdminDashboardProps> = ({
       });
     }
 
-    // Baseline realistic trend if few historical dates exist
-    const baseRev = stats.thisMonthRevenue > 0 ? stats.thisMonthRevenue : 38000000;
+    // Baseline trend from actual revenue (0 when no payments recorded yet)
+    const baseRev = stats.thisMonthRevenue > 0 ? stats.thisMonthRevenue : 0;
     const sampleRatios = [0.09, 0.14, 0.11, 0.18, 0.15, 0.21, 0.12];
     return sampleRatios.map((r, i) => ({
       date: `2026-10-${21 + i}`,
@@ -201,11 +208,12 @@ export const S10_AdminDashboard: React.FC<AdminDashboardProps> = ({
 
   // Calculated percentage comparison for recent revenue velocity
   const revenueTrendPct = useMemo(() => {
-    if (dailyRevenueTrend.length < 4) return 12.4;
+    const totalSum = dailyRevenueTrend.reduce((sum, d) => sum + d.amount, 0);
+    if (totalSum === 0 || dailyRevenueTrend.length < 2) return 0;
     const mid = Math.floor(dailyRevenueTrend.length / 2);
     const firstHalf = dailyRevenueTrend.slice(0, mid).reduce((sum, d) => sum + d.amount, 0);
     const secondHalf = dailyRevenueTrend.slice(mid).reduce((sum, d) => sum + d.amount, 0);
-    if (firstHalf === 0) return 10.0;
+    if (firstHalf === 0) return secondHalf > 0 ? 100 : 0;
     const change = ((secondHalf - firstHalf) / firstHalf) * 100;
     return Number(change.toFixed(1));
   }, [dailyRevenueTrend]);
@@ -399,6 +407,20 @@ export const S10_AdminDashboard: React.FC<AdminDashboardProps> = ({
             <Plus className="w-4 h-4 text-[#C6A15B] shrink-0" />
             <span>{t('dashboard.newStudent')}</span>
           </button>
+          {role === 'owner' && !activeStaffUser && (
+            <button
+              onClick={() => onNavigate('S80_Employees')}
+              className="w-full sm:w-auto px-4 py-3 sm:py-2.5 bg-[#1A2D4F] hover:bg-[#223963] text-slate-100 font-bold text-xs rounded-xl border border-[#C6A15B]/30 transition-colors flex items-center justify-center gap-2 cursor-pointer whitespace-nowrap active:scale-[0.98] min-h-[44px]"
+            >
+              <KeyRound className="w-4 h-4 text-[#C6A15B] shrink-0" />
+              <span>{t('nav.employees')}</span>
+              {staffUsers.length > 0 && (
+                <span className="px-1.5 py-0.5 rounded-full bg-[#C6A15B]/20 text-[#E5D5AA] text-[10px] font-extrabold ml-0.5">
+                  {staffUsers.length}
+                </span>
+              )}
+            </button>
+          )}
         </div>
       </div>
 
@@ -466,9 +488,9 @@ export const S10_AdminDashboard: React.FC<AdminDashboardProps> = ({
             {/* Recharts Mini Sparkline Chart */}
             <div className="mt-2.5 pt-2 border-t border-slate-100">
               <div className="flex items-center justify-between text-[10px] text-slate-400 mb-1">
-                <span className="font-medium">So‘nggi kunlik trend</span>
+                <span className="font-medium">{t('dashboard.dailyTrend')}</span>
                 <span className="font-semibold text-slate-600 font-mono">
-                  {formatCurrency(dailyRevenueTrend[dailyRevenueTrend.length - 1]?.amount || 0)}/kun
+                  {formatCurrency(dailyRevenueTrend[dailyRevenueTrend.length - 1]?.amount || 0)}{t('dashboard.perDay')}
                 </span>
               </div>
               <div className="w-full h-11">
@@ -575,10 +597,13 @@ export const S10_AdminDashboard: React.FC<AdminDashboardProps> = ({
       <div className="bg-white rounded-2xl p-5 border border-slate-200 shadow-xs flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
           <h3 className="font-bold text-slate-900 text-sm flex items-center gap-2">
-            ⚡ Kunlik vazifalar & Xabarnomalar
+            ⚡ {t('dashboard.tasksTitle')}
           </h3>
           <p className="text-xs text-slate-500 mt-0.5">
-            {pendingMaintenanceCount} ta kutilayotgan ta'mirlash, {upcomingRenewalsCount} ta shartnoma yangilash mavjud.
+            {t('dashboard.tasksSummary', {
+              maintenance: pendingMaintenanceCount,
+              renewals: upcomingRenewalsCount,
+            })}
           </p>
         </div>
         <div className="flex items-center gap-2 self-end sm:self-center">
@@ -587,15 +612,15 @@ export const S10_AdminDashboard: React.FC<AdminDashboardProps> = ({
             onClick={() => setActiveView('S100_Issues')}
             className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-800 font-semibold text-xs rounded-xl transition-all cursor-pointer"
           >
-            Vazifalarni ko‘rish ({totalTasksCount}) →
+            {t('dashboard.viewTasks', { count: totalTasksCount })}
           </button>
           <button
             type="button"
             onClick={() => setShowFullTasks(!showFullTasks)}
             className="px-2.5 py-2 text-slate-500 hover:text-slate-800 hover:bg-slate-100 rounded-xl transition-colors text-xs font-semibold cursor-pointer border border-transparent hover:border-slate-200"
-            title={showFullTasks ? 'Ixcham ko‘rinish' : 'Batafsil ro‘yxat'}
+            title={showFullTasks ? t('common.collapse') : t('common.expand')}
           >
-            {showFullTasks ? 'Yig‘ish' : 'Batafsil'}
+            {showFullTasks ? t('common.collapse') : t('common.expand')}
           </button>
         </div>
       </div>
@@ -610,34 +635,38 @@ export const S10_AdminDashboard: React.FC<AdminDashboardProps> = ({
         />
       )}
 
-      {/* 2. Compact Gemini AI Widget */}
+      {/* 2. Compact Maintenance Health Summary Widget */}
       <div className="bg-[#101C32] rounded-2xl p-5 text-white shadow-xs flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div className="space-y-1">
           <div className="flex items-center gap-2">
-            <span className="text-[#C6A15B] font-bold text-sm">✨ Gemini AI Xulosasi</span>
+            <span className="text-[#C6A15B] font-bold text-sm">{t('dashboard.urgentIssues')}</span>
             <span className="bg-[#C6A15B]/20 text-[#C6A15B] text-[10px] px-2 py-0.5 rounded-full font-mono">
-              66% Salomatlik
+              {stats.totalRooms > 0
+                ? `${Math.max(0, Math.round(((stats.totalRooms - stats.maintenanceRooms) / stats.totalRooms) * 100))}%`
+                : '100%'}
             </span>
           </div>
           <p className="text-xs text-slate-300 max-w-xl">
-            302-xonadagi elektr va 204-xonadagi santexnika nosozligi zudlik bilan hal etilishi shart.
+            {openIssues.length === 0
+              ? t('dashboard.noUrgentIssues')
+              : `${openIssues[0].location}: ${openIssues[0].description} (${openIssues.length})`}
           </p>
         </div>
         <div className="flex items-center gap-2 self-end sm:self-center">
           <button 
             type="button"
-            onClick={() => setActiveView('S100_Issues')}
+            onClick={() => setActiveView('S90_Issues')}
             className="px-4 py-2 bg-[#C6A15B] hover:bg-[#b5904b] text-slate-900 font-bold text-xs rounded-xl transition-all cursor-pointer"
           >
-            Tahlil markazi →
+            {t('common.view')} →
           </button>
           <button
             type="button"
             onClick={() => setShowFullAi(!showFullAi)}
             className="px-2.5 py-2 text-slate-300 hover:text-white hover:bg-white/10 rounded-xl transition-colors text-xs font-semibold cursor-pointer border border-transparent hover:border-white/10"
-            title={showFullAi ? 'Ixcham ko‘rinish' : 'Batafsil tahlil'}
+            title={showFullAi ? t('common.collapse') : t('common.expand')}
           >
-            {showFullAi ? 'Yig‘ish' : 'Batafsil'}
+            {showFullAi ? t('common.collapse') : t('common.expand')}
           </button>
         </div>
       </div>
@@ -656,13 +685,28 @@ export const S10_AdminDashboard: React.FC<AdminDashboardProps> = ({
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-slate-100">
           <div>
             <h3 className="font-bold text-slate-900 text-sm flex items-center gap-2">
-              🏢 Xonalar va o‘rinlar taqsimoti
+              🏢 {t('dashboard.roomAndBedBreakdown')}
             </h3>
             <p className="text-xs text-slate-500 mt-0.5">
-              {stats.totalRooms} xonalar • {stats.totalBeds} jami o‘rinlar ({stats.occupiedBeds} band o‘rinlar, {stats.availableBeds} bo‘sh o‘rinlar)
+              {t('dashboard.roomsSummaryLine', {
+                rooms: stats.totalRooms,
+                beds: stats.totalBeds,
+                occupied: stats.occupiedBeds,
+                available: stats.availableBeds,
+              })}
             </p>
           </div>
-          <div className="flex items-center gap-2.5">
+          <div className="flex flex-wrap items-center gap-2.5">
+            {(role === 'owner' || role === 'manager') && (
+              <button
+                type="button"
+                onClick={() => setConfirmResetBeds((prev) => !prev)}
+                className="px-2.5 py-1.5 rounded-xl bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-200 text-[11px] font-bold flex items-center gap-1 cursor-pointer transition-colors"
+              >
+                <RotateCcw className="w-3 h-3 text-amber-700" />
+                <span>{t('rooms.resetAllBedsBtn')}</span>
+              </button>
+            )}
             {/* Metric Toggle: Rooms vs Beds */}
             <div className="bg-slate-100 p-0.5 rounded-xl flex items-center text-xs font-semibold border border-slate-200/80">
               <button
@@ -674,7 +718,7 @@ export const S10_AdminDashboard: React.FC<AdminDashboardProps> = ({
                     : 'text-slate-500 hover:text-slate-900'
                 }`}
               >
-                Xonalar
+                {t('common.rooms')}
               </button>
               <button
                 type="button"
@@ -685,17 +729,54 @@ export const S10_AdminDashboard: React.FC<AdminDashboardProps> = ({
                     : 'text-slate-500 hover:text-slate-900'
                 }`}
               >
-                O‘rinlar
+                {t('common.beds')}
               </button>
             </div>
             <button 
               onClick={() => handleRoomFilterClick('all')} 
               className="text-xs font-bold text-sky-600 hover:text-sky-700 flex items-center gap-1 cursor-pointer ml-1"
             >
-              Barcha xonalar →
+              {t('dashboard.allRoomsLink')}
             </button>
           </div>
         </div>
+
+        {confirmResetBeds && (
+          <div className="p-3.5 rounded-xl bg-amber-50 border border-amber-300 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div>
+              <div className="text-xs font-extrabold text-amber-950">{t('rooms.resetAllBedsConfirmTitle')}</div>
+              <p className="text-[11px] text-amber-900/85">{t('rooms.resetAllBedsConfirmDesc')}</p>
+            </div>
+            <div className="flex items-center gap-2 shrink-0">
+              <button
+                type="button"
+                onClick={() => setConfirmResetBeds(false)}
+                className="px-3 py-1.5 rounded-lg bg-white hover:bg-slate-100 text-slate-700 border border-slate-200 font-bold text-xs cursor-pointer"
+              >
+                {t('common.cancel')}
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  resetAllBedsToAvailable();
+                  setConfirmResetBeds(false);
+                  setResetFeedback(t('rooms.resetAllBedsSuccess'));
+                  window.setTimeout(() => setResetFeedback(null), 4000);
+                }}
+                className="px-3.5 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-700 text-white font-bold text-xs cursor-pointer"
+              >
+                {t('rooms.resetAllBedsConfirmBtn')}
+              </button>
+            </div>
+          </div>
+        )}
+
+        {resetFeedback && (
+          <div className="p-3 rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-800 text-xs font-semibold flex items-center gap-2">
+            <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+            <span>{resetFeedback}</span>
+          </div>
+        )}
 
         {/* Responsive Grid: Recharts Summary Donut Chart + Interactive Filter Cards */}
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-stretch">
@@ -705,10 +786,10 @@ export const S10_AdminDashboard: React.FC<AdminDashboardProps> = ({
               <div className="flex items-center justify-between mb-2">
                 <div>
                   <h4 className="text-xs font-bold text-slate-800 uppercase tracking-wider">
-                    {roomChartMetric === 'rooms' ? 'Xonalar taqsimoti' : 'O‘rinlar taqsimoti'}
+                    {roomChartMetric === 'rooms' ? t('dashboard.roomsDistribution') : t('dashboard.bedsDistribution')}
                   </h4>
                   <p className="text-[11px] text-slate-400">
-                    Occupied vs Empty vs Maintenance
+                    {t('dashboard.chartLegendSubtitle')}
                   </p>
                 </div>
                 <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-sky-50 text-sky-700 border border-sky-200">
@@ -752,7 +833,7 @@ export const S10_AdminDashboard: React.FC<AdminDashboardProps> = ({
                                 <span>{data.name}</span>
                               </div>
                               <div className="text-base font-black text-white font-mono">
-                                {data.value} {roomChartMetric === 'rooms' ? 'xona' : 'o‘rin'}
+                                {data.value} {roomChartMetric === 'rooms' ? t('dashboard.roomWord') : t('dashboard.bedWord')}
                                 <span className="text-xs text-[#C6A15B] font-semibold ml-1.5">
                                   ({data.percentage}%)
                                 </span>
@@ -761,7 +842,7 @@ export const S10_AdminDashboard: React.FC<AdminDashboardProps> = ({
                                 {data.subText}
                               </div>
                               <div className="text-[10px] text-sky-400 mt-1 font-medium">
-                                Ro‘yxatni filtrlash uchun bosing →
+                                {t('dashboard.clickToFilter')}
                               </div>
                             </div>
                           );
@@ -775,13 +856,13 @@ export const S10_AdminDashboard: React.FC<AdminDashboardProps> = ({
                 {/* Center KPI badge inside the Donut */}
                 <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none">
                   <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider leading-none">
-                    Jami
+                    {t('common.total')}
                   </span>
                   <span className="text-2xl font-black text-slate-900 font-mono leading-tight my-0.5">
                     {roomChartMetric === 'rooms' ? formatNumber(stats.totalRooms) : formatNumber(stats.totalBeds)}
                   </span>
                   <span className="text-[11px] text-slate-500 font-medium leading-none">
-                    {roomChartMetric === 'rooms' ? 'xona' : 'o‘rin'}
+                    {roomChartMetric === 'rooms' ? t('dashboard.roomWord') : t('dashboard.bedWord')}
                   </span>
                 </div>
               </div>
@@ -815,10 +896,10 @@ export const S10_AdminDashboard: React.FC<AdminDashboardProps> = ({
                   </div>
                   <div className="text-right shrink-0 ml-2">
                     <div className="text-xs font-extrabold text-slate-900 font-mono">
-                      {item.value} {roomChartMetric === 'rooms' ? 'xona' : 'o‘rin'}
+                      {item.value} {roomChartMetric === 'rooms' ? t('dashboard.roomWord') : t('dashboard.bedWord')}
                     </div>
                     <div className="text-[10px] text-sky-600 font-semibold group-hover:underline">
-                      Ko‘rish →
+                      {t('common.view')} →
                     </div>
                   </div>
                 </button>
@@ -835,13 +916,13 @@ export const S10_AdminDashboard: React.FC<AdminDashboardProps> = ({
               className="text-left p-4 rounded-xl border border-slate-200 hover:border-slate-300 hover:shadow-md transition-all cursor-pointer bg-slate-50/50 flex flex-col justify-between"
             >
               <div className="text-[11px] font-bold text-slate-500 uppercase tracking-wider truncate">
-                Jami xonalar
+                {t('dashboard.totalRooms')}
               </div>
               <div className="text-2xl font-extrabold text-slate-900 font-mono my-1">
                 {formatNumber(stats.totalRooms)}
               </div>
               <div className="text-[10px] text-slate-500 truncate">
-                {formatNumber(stats.totalBeds)} jami o‘rinlar
+                {formatNumber(stats.totalBeds)} {t('dashboard.totalBeds').toLowerCase()}
               </div>
             </button>
 
@@ -852,13 +933,13 @@ export const S10_AdminDashboard: React.FC<AdminDashboardProps> = ({
               className="text-left p-4 rounded-xl border border-sky-200 hover:border-sky-300 hover:shadow-md transition-all cursor-pointer bg-sky-50/50 flex flex-col justify-between"
             >
               <div className="text-[11px] font-bold text-sky-700 uppercase tracking-wider truncate">
-                Band xonalar
+                {t('dashboard.occupiedRooms')}
               </div>
               <div className="text-2xl font-extrabold text-sky-900 font-mono my-1">
                 {formatNumber(stats.occupiedRooms)}
               </div>
               <div className="text-[10px] text-sky-700 truncate">
-                {formatNumber(stats.occupiedBeds)} band o‘rinlar
+                {formatNumber(stats.occupiedBeds)} {t('beds.occupied').toLowerCase()}
               </div>
             </button>
 
@@ -869,13 +950,13 @@ export const S10_AdminDashboard: React.FC<AdminDashboardProps> = ({
               className="text-left p-4 rounded-xl border border-rose-200 hover:border-rose-300 hover:shadow-md transition-all cursor-pointer bg-rose-50/50 flex flex-col justify-between"
             >
               <div className="text-[11px] font-bold text-rose-700 uppercase tracking-wider truncate">
-                To‘liq band xonalar
+                {t('dashboard.fullRooms')}
               </div>
               <div className="text-2xl font-extrabold text-rose-900 font-mono my-1">
                 {formatNumber(stats.fullRooms)}
               </div>
               <div className="text-[10px] text-rose-600 truncate">
-                100% to‘lganlik darajasi
+                {t('dashboard.fullRatioLabel')}
               </div>
             </button>
 
@@ -886,13 +967,13 @@ export const S10_AdminDashboard: React.FC<AdminDashboardProps> = ({
               className="text-left p-4 rounded-xl border border-indigo-200 hover:border-indigo-300 hover:shadow-md transition-all cursor-pointer bg-indigo-50/50 flex flex-col justify-between"
             >
               <div className="text-[11px] font-bold text-indigo-700 uppercase tracking-wider truncate">
-                Qisman band xonalar
+                {t('dashboard.partiallyOccupiedRooms')}
               </div>
               <div className="text-2xl font-extrabold text-indigo-900 font-mono my-1">
                 {formatNumber(stats.partiallyOccupiedRooms)}
               </div>
               <div className="text-[10px] text-indigo-600 truncate">
-                Bo‘sh o‘rinlar mavjud
+                {t('dashboard.partialAvailableLabel')}
               </div>
             </button>
 
@@ -903,13 +984,13 @@ export const S10_AdminDashboard: React.FC<AdminDashboardProps> = ({
               className="text-left p-4 rounded-xl border border-emerald-200 hover:border-emerald-300 hover:shadow-md transition-all cursor-pointer bg-emerald-50/50 flex flex-col justify-between"
             >
               <div className="text-[11px] font-bold text-emerald-700 uppercase tracking-wider truncate">
-                Bo‘sh xonalar
+                {t('dashboard.emptyRooms')}
               </div>
               <div className="text-2xl font-extrabold text-emerald-900 font-mono my-1">
                 {formatNumber(stats.emptyRooms)}
               </div>
               <div className="text-[10px] text-emerald-700 truncate">
-                {formatNumber(stats.availableBeds)} bo‘sh o‘rinlar
+                {formatNumber(stats.availableBeds)} {t('beds.available').toLowerCase()}
               </div>
             </button>
 
@@ -920,13 +1001,13 @@ export const S10_AdminDashboard: React.FC<AdminDashboardProps> = ({
               className="text-left p-4 rounded-xl border border-amber-200 hover:border-amber-300 hover:shadow-md transition-all cursor-pointer bg-amber-50/50 flex flex-col justify-between"
             >
               <div className="text-[11px] font-bold text-amber-800 uppercase tracking-wider truncate">
-                Ta’mirdagi xonalar
+                {t('dashboard.maintenanceRooms')}
               </div>
               <div className="text-2xl font-extrabold text-amber-900 font-mono my-1">
                 {formatNumber(stats.maintenanceRooms)}
               </div>
               <div className="text-[10px] text-amber-800 truncate">
-                {formatNumber(stats.maintenanceBeds)} ta’mirdagi o‘rinlar
+                {formatNumber(stats.maintenanceBeds)} {t('beds.maintenance').toLowerCase()}
               </div>
             </button>
           </div>

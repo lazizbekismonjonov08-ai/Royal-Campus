@@ -21,8 +21,38 @@ import {
   AccessLogEvent,
   AccessControlPolicy,
   StoredUserAccount,
+  MonthlyBillingEntry,
+  StudentBillingLedger,
+  BillingPaymentMethod,
+  InitialBillingSetup,
+  BillingEntryStatus,
+  StaffUser,
 } from '../types';
-import { formatUzPhoneDisplay, normalizePhoneKey } from '../utils/authCrypto';
+import {
+  formatUzPhoneDisplay,
+  normalizePhoneKey,
+  generateSalt,
+  hashPassword,
+  generateTempPassword,
+  validateStrongPassword,
+} from '../utils/authCrypto';
+import {
+  ACADEMIC_BILLING_MONTHS,
+  addDaysToDateStr,
+  comparePaymentsChronoDesc,
+  computePaymentExpiryInfo,
+  computeStudentBillingSummary,
+  ensureDateTimeValue,
+  extractDatePart,
+  extractTimePart,
+  findLinkedApplication,
+  formatMethodLabel,
+  getCurrentBillingPeriod,
+  getCurrentLocalDateTime,
+  isValidIsoDate,
+  normalizeBillingMethod,
+  safeAmount,
+} from '../utils/billingUtils';
 import {
   generateSeedData,
   INITIAL_SETTINGS,
@@ -37,6 +67,28 @@ import {
   AccessEvaluationResponse,
   ConnectionTestResult,
 } from '../services/accessControl/types';
+import {
+  fetchStaffUsersFromSupabase,
+  loadAndSeedSupabaseData,
+  syncAssignBedFlow,
+  syncCreateResidentWithPlacement,
+  syncDeleteApplicationCascade,
+  syncDeleteResidentCascade,
+  syncDeleteRoomAndBeds,
+  syncDeleteStaffUser,
+  syncInsertStaffUser,
+  syncRecordPaymentFlow,
+  syncReleaseBedCascade,
+  syncReplaceResidentPayments,
+  syncResetAllBeds,
+  syncRoomTariffChanges,
+  syncUpdateApplication,
+  syncUpdateSingleBed,
+  syncUpdateStaffUser,
+  syncUpsertApplication,
+  syncUpsertResident,
+  syncUpsertRoomAndBeds,
+} from '../services/supabaseSync';
 
 interface DormContextType {
   role: Role;
@@ -44,6 +96,8 @@ interface DormContextType {
   currentUserName: string;
   activeStudentId: string;
   setActiveStudentId: (id: string) => void;
+  activeStaffUser: StaffUser | null;
+  setActiveStaffUser: (staff: StaffUser | null) => void;
   
   // Data
   rooms: Room[];
@@ -53,6 +107,7 @@ interface DormContextType {
   payments: Payment[];
   contracts: Contract[];
   employees: Employee[];
+  staffUsers: StaffUser[];
   issues: Issue[];
   disciplineRecords: DisciplineRecord[];
   notifications: NotificationItem[];
@@ -60,6 +115,8 @@ interface DormContextType {
   settings: DormSettings;
   roomFilter: string;
   setRoomFilter: (filter: string) => void;
+  isLoadingData: boolean;
+  refreshFromSupabase: () => Promise<void>;
 
   // Key KPI metrics
   stats: {
@@ -90,15 +147,49 @@ interface DormContextType {
 
   // Actions
   addStudent: (studentData: Partial<Student>) => Student;
+  createResidentWithPlacement: (params: {
+    resident: {
+      fullName: string;
+      phone: string;
+      birthDate: string;
+      passportNumber: string;
+      university: string;
+      faculty: string;
+      degreeLevel: string;
+      course: number | string;
+      group: string;
+      parentPhone: string;
+      permanentAddress: string;
+      roomType: RoomType;
+      monthlyTariff?: number;
+    };
+    placement?: { roomId: string; bedId: string } | null;
+    initialBilling?: InitialBillingSetup;
+  }) => Promise<{
+    student: Student;
+    tempLogin: string;
+    tempPassword: string;
+    roomNumber?: string;
+    bedLabel?: string;
+    floor?: number;
+    contractNumber?: string;
+  } | null>;
   updateStudent: (id: string, updates: Partial<Student>) => void;
   deleteStudent: (id: string) => void;
   
   submitApplication: (appData: Omit<Application, 'id' | 'submittedAt' | 'status'>) => Application;
-  reviewApplication: (id: string, status: ApplicationStatus, notes?: string) => void;
+  reviewApplication: (id: string, status: ApplicationStatus, notes?: string) => string | undefined;
+  deleteApplication: (id: string) => void;
 
-  assignBed: (studentId: string, roomId: string, bedId: string) => void;
+  assignBed: (
+    studentId: string,
+    roomId: string,
+    bedId: string,
+    initialBilling?: InitialBillingSetup
+  ) => Promise<{ tempLogin: string; tempPassword: string; roomNumber: string; bedLabel: string } | null>;
   transferBed: (studentId: string, newRoomId: string, newBedId: string) => void;
   releaseBed: (bedId: string) => void;
+  resetAllBedsToAvailable: () => void;
 
   // Manual Room & Bed Configuration (Owner & Manager Only)
   canConfigureRooms: boolean;
@@ -142,11 +233,33 @@ interface DormContextType {
     studentId: string;
     amount: number;
     paymentDate: string;
+    paidUntil?: string;
     periodMonth: string;
-    paymentMethod: 'cash' | 'card' | 'bank_transfer';
+    paymentMethod: BillingPaymentMethod;
     notes?: string;
+    monthlyRateOverride?: number;
   }) => Payment;
   handleAcceptPayment: (studentId: string, amount: number) => Payment;
+  billingLedgers: Record<string, StudentBillingLedger>;
+  updateStudentBillingLedger: (
+    entityId: string,
+    updates: {
+      monthlyRateOverride?: number;
+      paidUntil?: string;
+      months: Record<string, MonthlyBillingEntry>;
+    }
+  ) => void;
+  upsertBillingEntry: (params: {
+    entityId: string;
+    periodMonth: string; // 'YYYY-MM'
+    paidAmount: number;
+    status: BillingEntryStatus;
+    paymentMethod: BillingPaymentMethod;
+    paymentDate: string;
+    paidUntil?: string;
+    notes?: string;
+    monthlyRateOverride?: number;
+  }) => void;
 
   createIssue: (issueData: {
     category: Issue['category'];
@@ -166,6 +279,50 @@ interface DormContextType {
 
   addEmployee: (empData: Omit<Employee, 'id' | 'lastLogin'>) => void;
   toggleEmployeeStatus: (id: string) => void;
+
+  // Owner Staff & Passwords (Supabase staff_users)
+  refreshStaffUsers: () => Promise<void>;
+  addStaffUser: (data: {
+    fullName: string;
+    roleTitle: string;
+    login: string;
+    password: string;
+    isActive?: boolean;
+  }) => Promise<{
+    success: boolean;
+    errorCode?:
+      | 'unauthorized'
+      | 'missing_fields'
+      | 'duplicate_login'
+      | 'reserved_login'
+      | 'weak_password'
+      | 'sync_error';
+    errorMessage?: string;
+    staffUser?: StaffUser;
+  }>;
+  updateStaffUser: (
+    id: string,
+    updates: {
+      fullName?: string;
+      roleTitle?: string;
+      login?: string;
+      password?: string;
+      isActive?: boolean;
+    }
+  ) => Promise<{
+    success: boolean;
+    errorCode?:
+      | 'unauthorized'
+      | 'not_found'
+      | 'missing_fields'
+      | 'duplicate_login'
+      | 'reserved_login'
+      | 'weak_password'
+      | 'sync_error';
+    errorMessage?: string;
+  }>;
+  toggleStaffUserActive: (id: string) => Promise<{ success: boolean; errorMessage?: string }>;
+  deleteStaffUser: (id: string) => Promise<{ success: boolean; errorMessage?: string }>;
 
   updateSettings: (newSettings: DormSettings) => void;
   resetToDefaults: () => void;
@@ -193,6 +350,7 @@ interface DormContextType {
   registerStudentAccount: (params: {
     fullName?: string;
     phone: string;
+    login?: string;
     passwordHash: string;
     passwordSalt: string;
   }) => Student;
@@ -202,15 +360,17 @@ interface DormContextType {
     passwordSalt: string;
     targetRole?: Role;
   }) => { success: boolean; role: Role; studentId?: string };
+  ensureStudentForIdentifier: (identifier: string) => string | undefined;
 }
 
-const STORAGE_KEY = 'SMART_DORM_V1_STATE';
+const STORAGE_KEY = 'ROYAL_CAMPUS_DORM_V3_STATE';
 
 const DormContext = createContext<DormContextType | undefined>(undefined);
 
 export const DormProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [role, setRole] = useState<Role>('owner');
-  const [activeStudentId, setActiveStudentId] = useState<string>('std-1001');
+  const [activeStudentId, setActiveStudentId] = useState<string>('');
+  const [activeStaffUser, setActiveStaffUser] = useState<StaffUser | null>(null);
   const [roomFilter, setRoomFilter] = useState<string>('all');
 
   // Load persistent state or generate seed data
@@ -240,40 +400,6 @@ export const DormProvider: React.FC<{ children: React.ReactNode }> = ({ children
                   }))
                 : [],
             }));
-        }
-        // Ensure some unassigned students exist so the assign workflow can be tested immediately
-        if (Array.isArray(parsed.students)) {
-          const hasUnassigned = parsed.students.some((s: Student) => !s.roomId);
-          if (!hasUnassigned) {
-            const seedFresh = generateSeedData();
-            const unassigned = seedFresh.students.filter((s: Student) => !s.roomId);
-            parsed.students = [...unassigned, ...parsed.students];
-          }
-        }
-        // Ensure payments contains October payments for accurate revenue metrics
-        if (Array.isArray(parsed.payments)) {
-          const hasOct = parsed.payments.some((p: Payment) => p.periodMonth === '2026-10');
-          if (!hasOct) {
-            const seedFresh = generateSeedData();
-            parsed.payments = seedFresh.payments;
-          }
-        }
-        // Ensure some upcoming contract renewals exist for automated alert tasks
-        if (Array.isArray(parsed.contracts)) {
-          const hasUpcoming = parsed.contracts.some((c: Contract) => c.status === 'active' && (c.endDate.startsWith('2026-10') || c.endDate.startsWith('2026-11')));
-          if (!hasUpcoming && parsed.contracts.length > 3) {
-            parsed.contracts[1].endDate = '2026-11-04';
-            parsed.contracts[2].endDate = '2026-11-09';
-            parsed.contracts[3].endDate = '2026-11-15';
-          }
-        }
-        // Ensure pending maintenance issues exist
-        if (Array.isArray(parsed.issues)) {
-          const hasPendingIssues = parsed.issues.some((i: Issue) => i.status === 'open' || i.status === 'in_progress');
-          if (!hasPendingIssues) {
-            const seedFresh = generateSeedData();
-            parsed.issues = seedFresh.issues;
-          }
         }
         // Integrity check: reconcile occupied beds with active student assignments
         if (Array.isArray(parsed.rooms) && Array.isArray(parsed.students)) {
@@ -333,11 +459,9 @@ export const DormProvider: React.FC<{ children: React.ReactNode }> = ({ children
             isLegacyDefaults ||
             rt.standard_plus === undefined ||
             rt.comfort_plus === undefined ||
-            hasLegacyLuxPlus ||
-            rt.panoramicSurcharge !== undefined;
+            hasLegacyLuxPlus;
 
           if (needsTierMigration) {
-            const legacySurcharge = typeof rt.panoramicSurcharge === 'number' ? rt.panoramicSurcharge : 200000;
             parsed.settings = {
               ...parsed.settings,
               roomTariffs: isLegacyDefaults
@@ -345,30 +469,21 @@ export const DormProvider: React.FC<{ children: React.ReactNode }> = ({ children
                 : {
                     standard: rt.standard ?? INITIAL_SETTINGS.roomTariffs.standard,
                     standard_plus:
-                      rt.standard_plus ??
-                      (typeof rt.standard === 'number'
-                        ? rt.standard + legacySurcharge
-                        : INITIAL_SETTINGS.roomTariffs.standard_plus),
+                      rt.standard_plus ?? INITIAL_SETTINGS.roomTariffs.standard_plus,
                     comfort: rt.comfort ?? INITIAL_SETTINGS.roomTariffs.comfort,
                     comfort_plus:
-                      rt.comfort_plus ??
-                      (typeof rt.comfort === 'number'
-                        ? rt.comfort + legacySurcharge
-                        : INITIAL_SETTINGS.roomTariffs.comfort_plus),
+                      rt.comfort_plus ?? INITIAL_SETTINGS.roomTariffs.comfort_plus,
                     lux: rt.lux ?? INITIAL_SETTINGS.roomTariffs.lux,
                   },
             };
 
-            const upgradeRoomType = (rawType: string | undefined, wasPanoramic?: boolean): RoomType => {
+            const upgradeRoomType = (rawType: string | undefined): RoomType => {
               const base = (rawType || 'comfort') as string;
               if (base === 'lux_plus') {
                 return 'lux';
               }
               if (base === 'standard_plus' || base === 'comfort_plus') {
                 return base;
-              }
-              if (wasPanoramic && (base === 'standard' || base === 'comfort')) {
-                return `${base}_plus` as RoomType;
               }
               if (base === 'standard' || base === 'comfort' || base === 'lux') {
                 return base;
@@ -382,14 +497,13 @@ export const DormProvider: React.FC<{ children: React.ReactNode }> = ({ children
                 ? new Map<string, Room>(seedFresh.rooms.map((sr) => [sr.id, sr]))
                 : null;
 
-              parsed.rooms = parsed.rooms.map((r: Room & { isPanoramic?: boolean }) => {
+              parsed.rooms = parsed.rooms.map((r: Room) => {
                 const matchedSeed = seedRoomMap?.get(r.id);
                 const nextType = matchedSeed
                   ? matchedSeed.type
-                  : upgradeRoomType(r.type, Boolean(r.isPanoramic));
-                const { isPanoramic: _omitPano, ...cleanRoom } = r;
+                  : upgradeRoomType(r.type);
                 return {
-                  ...cleanRoom,
+                  ...r,
                   type: nextType,
                   priceMonthly:
                     parsed.settings.roomTariffs[nextType] ?? INITIAL_SETTINGS.roomTariffs[nextType],
@@ -401,41 +515,35 @@ export const DormProvider: React.FC<{ children: React.ReactNode }> = ({ children
               const updatedRoomMap = new Map<string, Room>(
                 (parsed.rooms || []).map((ur: Room) => [ur.id, ur])
               );
-              parsed.students = parsed.students.map((s: Student & { isPanoramic?: boolean }) => {
-                const { isPanoramic: _omitPano, ...cleanStudent } = s;
-                if (cleanStudent.roomId && updatedRoomMap.has(cleanStudent.roomId)) {
-                  const rm = updatedRoomMap.get(cleanStudent.roomId)!;
+              parsed.students = parsed.students.map((s: Student) => {
+                if (s.roomId && updatedRoomMap.has(s.roomId)) {
+                  const rm = updatedRoomMap.get(s.roomId)!;
                   return {
-                    ...cleanStudent,
+                    ...s,
                     roomType: rm.type,
                     monthlyTariff: rm.priceMonthly,
                   };
                 }
-                const wasLuxPlus = (cleanStudent.roomType as string | undefined) === 'lux_plus';
-                const nextType = upgradeRoomType(cleanStudent.roomType, Boolean(s.isPanoramic));
+                const wasLuxPlus = (s.roomType as string | undefined) === 'lux_plus';
+                const nextType = upgradeRoomType(s.roomType);
                 return {
-                  ...cleanStudent,
-                  roomType: cleanStudent.roomType ? nextType : undefined,
+                  ...s,
+                  roomType: s.roomType ? nextType : undefined,
                   monthlyTariff:
-                    s.isPanoramic || isLegacyDefaults || wasLuxPlus
+                    isLegacyDefaults || wasLuxPlus
                       ? (parsed.settings.roomTariffs[nextType] ?? INITIAL_SETTINGS.roomTariffs[nextType])
-                      : cleanStudent.monthlyTariff,
+                      : s.monthlyTariff,
                 };
               });
             }
 
             if (Array.isArray(parsed.applications)) {
-              parsed.applications = parsed.applications.map(
-                (a: Application & { isPanoramic?: boolean }) => {
-                  const { isPanoramic: _omitPano, ...cleanApp } = a;
-                  return {
-                    ...cleanApp,
-                    preferredRoomType: cleanApp.preferredRoomType
-                      ? upgradeRoomType(cleanApp.preferredRoomType, Boolean(a.isPanoramic))
-                      : undefined,
-                  };
-                }
-              );
+              parsed.applications = parsed.applications.map((a: Application) => ({
+                ...a,
+                preferredRoomType: a.preferredRoomType
+                  ? upgradeRoomType(a.preferredRoomType)
+                  : undefined,
+              }));
             }
 
             if (Array.isArray(parsed.contracts)) {
@@ -452,31 +560,32 @@ export const DormProvider: React.FC<{ children: React.ReactNode }> = ({ children
             }
           }
         }
-        // Ensure APP-1001 & APP-1002 exist for landing page status tracker demos
-        if (Array.isArray(parsed.applications)) {
-          const hasApp1001 = parsed.applications.some((a: Application) => a.id === 'APP-1001');
-          const hasApp1002 = parsed.applications.some((a: Application) => a.id === 'APP-1002');
-          if (!hasApp1001 || !hasApp1002) {
-            const seedFresh = generateSeedData();
-            const demoApps = seedFresh.applications.filter(
-              (a) => (a.id === 'APP-1001' && !hasApp1001) || (a.id === 'APP-1002' && !hasApp1002)
-            );
-            parsed.applications = [...demoApps, ...parsed.applications];
-          }
-        }
-        // Ensure userAccounts array exists
+        // Ensure userAccounts, billingLedgers, and staffUsers exist
         if (!Array.isArray(parsed.userAccounts)) {
           parsed.userAccounts = [];
+        }
+        if (!parsed.billingLedgers || typeof parsed.billingLedgers !== 'object') {
+          parsed.billingLedgers = {};
+        }
+        if (!Array.isArray(parsed.staffUsers)) {
+          parsed.staffUsers = [];
         }
         return parsed;
       }
     } catch (e) {
       console.error('Failed to parse localStorage', e);
     }
-    return { ...generateSeedData(), userAccounts: [] as StoredUserAccount[] };
+    return {
+      ...generateSeedData(),
+      userAccounts: [] as StoredUserAccount[],
+      billingLedgers: {} as Record<string, StudentBillingLedger>,
+      staffUsers: [] as StaffUser[],
+    };
   });
 
-  // Save changes to localStorage
+  const [isLoadingData, setIsLoadingData] = useState<boolean>(true);
+
+  // Save changes to localStorage as fast client cache
   useEffect(() => {
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
@@ -484,6 +593,74 @@ export const DormProvider: React.FC<{ children: React.ReactNode }> = ({ children
       console.error('Failed to save to localStorage', e);
     }
   }, [state]);
+
+  const refreshFromSupabase = useCallback(async () => {
+    setIsLoadingData(true);
+    try {
+      const hydrated = await loadAndSeedSupabaseData(state.settings || INITIAL_SETTINGS);
+      if (!hydrated) return;
+
+      setState((prev: typeof state) => {
+        const nextState = {
+          ...prev,
+          rooms: hydrated.rooms.length > 0 ? hydrated.rooms : prev.rooms,
+          applications: hydrated.applications,
+          students: hydrated.students,
+          payments: hydrated.payments,
+          billingLedgers: hydrated.billingLedgers,
+          contracts: hydrated.contracts,
+          staffUsers: hydrated.staffUsers,
+        };
+        try {
+          localStorage.setItem(STORAGE_KEY, JSON.stringify(nextState));
+        } catch (e) {
+          console.error('Failed to cache hydrated Supabase state', e);
+        }
+        return nextState;
+      });
+    } finally {
+      setIsLoadingData(false);
+    }
+  }, []);
+
+  // Load rooms, beds, applications, residents, payments, and staff_users from Supabase on startup
+  // (automatically seeds 56 rooms & 344 beds once if empty)
+  useEffect(() => {
+    let active = true;
+    (async () => {
+      try {
+        const hydrated = await loadAndSeedSupabaseData(INITIAL_SETTINGS);
+        if (!active || !hydrated) return;
+
+        setState((prev: typeof state) => {
+          const nextState = {
+            ...prev,
+            rooms: hydrated.rooms.length > 0 ? hydrated.rooms : prev.rooms,
+            applications: hydrated.applications,
+            students: hydrated.students,
+            payments: hydrated.payments,
+            billingLedgers: hydrated.billingLedgers,
+            contracts: hydrated.contracts,
+            staffUsers: hydrated.staffUsers,
+          };
+          try {
+            localStorage.setItem(STORAGE_KEY, JSON.stringify(nextState));
+          } catch (e) {
+            console.error('Failed to cache hydrated Supabase state', e);
+          }
+          return nextState;
+        });
+      } finally {
+        if (active) {
+          setIsLoadingData(false);
+        }
+      }
+    })();
+
+    return () => {
+      active = false;
+    };
+  }, []);
 
   const {
     rooms,
@@ -493,6 +670,7 @@ export const DormProvider: React.FC<{ children: React.ReactNode }> = ({ children
     payments,
     contracts,
     employees,
+    staffUsers = [] as StaffUser[],
     issues,
     disciplineRecords,
     notifications,
@@ -502,10 +680,14 @@ export const DormProvider: React.FC<{ children: React.ReactNode }> = ({ children
     accessLogs = INITIAL_ACCESS_LOGS,
     accessPolicy = INITIAL_ACCESS_POLICY,
     userAccounts = [] as StoredUserAccount[],
+    billingLedgers = {} as Record<string, StudentBillingLedger>,
   } = state;
 
   // Determine current user name
   const currentUserName = useMemo(() => {
+    if (activeStaffUser && role !== 'student') {
+      return `${activeStaffUser.fullName} (${activeStaffUser.roleTitle})`;
+    }
     switch (role) {
       case 'owner': return 'Alisher Qodirov (Owner)';
       case 'manager': return 'Shaxnoza Raximova (Manager)';
@@ -518,7 +700,7 @@ export const DormProvider: React.FC<{ children: React.ReactNode }> = ({ children
       }
       default: return 'Foydalanuvchi';
     }
-  }, [role, students, activeStudentId]);
+  }, [role, students, activeStudentId, activeStaffUser]);
 
   // OPTIMIZATION: Heavy statistics calculation wrapped in useMemo
   const stats = useMemo(() => {
@@ -627,12 +809,28 @@ export const DormProvider: React.FC<{ children: React.ReactNode }> = ({ children
     const activeStudentsList = students.filter((s: Student) => s.status === 'active');
     const totalStudents = activeStudentsList.length;
 
-    const currentMonthStr = '2026-10';
+    const currentMonthStr = getCurrentBillingPeriod();
     const thisMonthPayments = payments.filter((p: Payment) => p.periodMonth === currentMonthStr && p.status === 'completed');
-    const thisMonthRevenue = thisMonthPayments.reduce((acc: number, p: Payment) => acc + p.amount, 0);
+    const thisMonthRevenue = thisMonthPayments.reduce((acc: number, p: Payment) => acc + safeAmount(p.amount), 0);
 
-    const expectedRevenue = activeStudentsList.reduce((acc: number, s: Student) => acc + s.monthlyTariff, 0);
-    const totalDebtAmount = activeStudentsList.reduce((acc: number, s: Student) => acc + (s.debtAmount || 0), 0);
+    let expectedRevenue = 0;
+    let totalDebtAmount = 0;
+    activeStudentsList.forEach((s: Student) => {
+      const linkedApp = findLinkedApplication(s, applications);
+      const activeCnt = contracts.find((c: Contract) => c.studentId === s.id && c.status === 'active');
+      const summary = computeStudentBillingSummary({
+        entityId: s.id,
+        student: s,
+        application: linkedApp,
+        contract: activeCnt,
+        rooms,
+        settings,
+        payments,
+        ledger: billingLedgers[s.id],
+      });
+      expectedRevenue += summary.monthlyRate;
+      totalDebtAmount += summary.remainingBalance;
+    });
 
     // Usable residential capacity excludes beds currently out of service / under maintenance
     const usableBeds = Math.max(0, totalBeds - maintenanceBeds);
@@ -666,7 +864,7 @@ export const DormProvider: React.FC<{ children: React.ReactNode }> = ({ children
       potentialVacantRevenue,
       occupancyPercentage,
     };
-  }, [rooms, students, payments]);
+  }, [rooms, students, payments, applications, contracts, settings, billingLedgers]);
 
   // Helper to add audit entry
   const addAudit = (action: string, objectType: string, objectId: string, oldValue?: string, newValue?: string) => {
@@ -695,25 +893,29 @@ export const DormProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
 
     const newId = `std-${Date.now()}`;
+    const validTypes: RoomType[] = ['standard', 'standard_plus', 'comfort', 'comfort_plus', 'lux'];
+    const resolvedType: RoomType =
+      data.roomType && validTypes.includes(data.roomType) ? data.roomType : 'comfort';
     const newStudent: Student = {
       id: newId,
-      fullName: data.fullName || 'Yangi Talaba',
-      phone: data.phone || '+998 90 000 00 00',
-      birthDate: data.birthDate || '2004-01-01',
-      passportNumber: data.passportNumber || 'FA0000000',
-      university: data.university || 'TATU',
-      faculty: data.faculty || 'Axborot Texnologiyalari',
-      course: data.course || 1,
-      group: data.group || '101-guruh',
-      parentPhone: data.parentPhone || '+998 90 111 22 33',
-      permanentAddress: data.permanentAddress || 'Toshkent v.',
+      fullName: data.fullName?.trim() || '',
+      phone: data.phone?.trim() || '',
+      birthDate: data.birthDate?.trim() || '',
+      passportNumber: data.passportNumber?.trim().toUpperCase() || '',
+      university: data.university?.trim() || '',
+      faculty: data.faculty?.trim() || '',
+      degreeLevel: data.degreeLevel || 'Bakalavr',
+      course: data.course ?? 1,
+      group: data.group?.trim() || '',
+      parentPhone: data.parentPhone?.trim() || '',
+      permanentAddress: data.permanentAddress?.trim() || '',
       status: 'active',
-      roomType: data.roomType,
+      roomType: resolvedType,
       monthlyTariff:
         data.monthlyTariff ||
-        (settings.roomTariffs?.[data.roomType || 'comfort'] ?? INITIAL_SETTINGS.roomTariffs[data.roomType || 'comfort']),
-      paidUntil: '2026-10-31',
-      nextPaymentDueDate: '2026-11-01',
+        (settings.roomTariffs?.[resolvedType] ?? INITIAL_SETTINGS.roomTariffs[resolvedType]),
+      paidUntil: '',
+      nextPaymentDueDate: '',
       debtAmount: 0,
       createdAt: new Date().toISOString().slice(0, 10),
       telegramChatId: `tg_${Date.now()}`,
@@ -724,8 +926,431 @@ export const DormProvider: React.FC<{ children: React.ReactNode }> = ({ children
       students: [newStudent, ...prev.students],
     }));
 
-    addAudit('Talaba qo\'shildi', 'Student', newStudent.id, undefined, newStudent.fullName);
+    void syncUpsertResident(newStudent);
+    addAudit('Rezident qo\'shildi', 'Student', newStudent.id, undefined, newStudent.fullName);
     return newStudent;
+  };
+
+  const createResidentWithPlacement: DormContextType['createResidentWithPlacement'] = async (params) => {
+    if (role === 'security') {
+      console.warn('Security role is not permitted to add residents.');
+      return null;
+    }
+
+    const { resident, placement, initialBilling } = params;
+    const nowIso = new Date().toISOString();
+    const todayStr = nowIso.slice(0, 10);
+    const newId = `std-${Date.now()}`;
+    const phoneKey = normalizePhoneKey(resident.phone);
+    const formattedPhone = phoneKey.length >= 9 ? formatUzPhoneDisplay(resident.phone) : resident.phone.trim();
+    const tempLogin = formattedPhone || resident.phone.trim();
+    const tempPassword = generateTempPassword();
+    const salt = generateSalt();
+    const passwordHash = await hashPassword(tempPassword, salt);
+
+    let preRoom: Room | undefined;
+    let preBed: Bed | undefined;
+    if (placement?.roomId && placement?.bedId) {
+      preRoom = rooms.find((r: Room) => r.id === placement.roomId);
+      preBed = preRoom?.beds.find((b: Bed) => b.id === placement.bedId);
+      if (
+        !preRoom ||
+        !preBed ||
+        preRoom.status === 'maintenance' ||
+        preRoom.status === 'closed' ||
+        preBed.status !== 'available'
+      ) {
+        return null;
+      }
+    }
+
+    const validRoomTypes: RoomType[] = ['standard', 'standard_plus', 'comfort', 'comfort_plus', 'lux'];
+    const preRawType: RoomType =
+      preRoom?.type ||
+      (resident.roomType && validRoomTypes.includes(resident.roomType) ? resident.roomType : 'comfort');
+    const preResolvedTariff =
+      initialBilling?.monthlyRateOverride && initialBilling.monthlyRateOverride > 0
+        ? safeAmount(initialBilling.monthlyRateOverride)
+        : settings.roomTariffs?.[preRawType] ??
+          preRoom?.priceMonthly ??
+          resident.monthlyTariff ??
+          INITIAL_SETTINGS.roomTariffs[preRawType];
+    const preBedLabel = preBed ? preBed.bedIdentifier || String(preBed.bedNumber) : undefined;
+    const preContractNumber =
+      preRoom && preBedLabel ? `RC-2026/${preRoom.roomNumber}-${preBedLabel}` : undefined;
+
+    const previewStudent: Student = {
+      id: newId,
+      fullName: resident.fullName.trim(),
+      phone: formattedPhone || resident.phone.trim(),
+      birthDate: resident.birthDate.trim(),
+      passportNumber: resident.passportNumber.trim().toUpperCase(),
+      university: resident.university.trim(),
+      faculty: resident.faculty.trim(),
+      degreeLevel: resident.degreeLevel,
+      course: resident.course,
+      group: resident.group.trim(),
+      parentPhone: resident.parentPhone.trim(),
+      permanentAddress: resident.permanentAddress.trim(),
+      status: 'active',
+      roomId: preRoom?.id,
+      bedId: preBed?.id,
+      roomNumber: preRoom?.roomNumber,
+      bedNumber: preBed?.bedNumber,
+      bedIdentifier: preBedLabel,
+      floor: preRoom?.floor,
+      roomType: preRawType,
+      monthlyTariff: preResolvedTariff,
+      paidUntil: '',
+      nextPaymentDueDate: '',
+      debtAmount: 0,
+      createdAt: todayStr,
+      telegramChatId: `tg_${Date.now()}`,
+      tempLogin,
+      tempPassword,
+    };
+
+    const billingDateTimeForSync = ensureDateTimeValue(initialBilling?.paymentDate);
+    const billingDateOnlyForSync = extractDatePart(billingDateTimeForSync) || todayStr;
+    const billingTimeForSync = extractTimePart(billingDateTimeForSync);
+    const billingMethodForSync: BillingPaymentMethod =
+      normalizeBillingMethod(initialBilling?.paymentMethod) || 'cash';
+    const billingNotesForSync = initialBilling?.notes?.trim() || undefined;
+    const targetPeriodForSync = initialBilling?.initialPeriod || getCurrentBillingPeriod();
+    const rawMonthStatusForSync = initialBilling?.monthStatus || 'pending';
+    const monthPaidAmountForSync =
+      rawMonthStatusForSync === 'paid'
+        ? preResolvedTariff
+        : rawMonthStatusForSync === 'partial'
+        ? safeAmount(initialBilling?.monthAmount)
+        : 0;
+    const resolvedPaidUntilForSync =
+      monthPaidAmountForSync > 0
+        ? isValidIsoDate(initialBilling?.paidUntil)
+          ? initialBilling!.paidUntil!.trim()
+          : addDaysToDateStr(billingDateTimeForSync, 30)
+        : '';
+
+    const initialPaymentId = `PAY-${Date.now() + 1}-MO`;
+    const initialPaymentsForSync: Payment[] =
+      monthPaidAmountForSync > 0
+        ? [
+            {
+              id: initialPaymentId,
+              studentId: newId,
+              studentName: resident.fullName.trim(),
+              floor: preRoom?.floor,
+              roomNumber: preRoom?.roomNumber || '---',
+              bedLabel: preBedLabel,
+              amount: monthPaidAmountForSync,
+              paymentDate: billingDateTimeForSync,
+              paymentTime: billingTimeForSync,
+              date: billingDateOnlyForSync,
+              paidUntil: resolvedPaidUntilForSync || undefined,
+              type: 'income',
+              periodMonth: targetPeriodForSync,
+              itemRemainingAfter: Math.max(0, preResolvedTariff - monthPaidAmountForSync),
+              paymentMethod: billingMethodForSync,
+              recordedBy: currentUserName,
+              status: 'completed',
+              notes: billingNotesForSync,
+            },
+          ]
+        : [];
+
+    const studentForSync: Student = {
+      ...previewStudent,
+      paidUntil: resolvedPaidUntilForSync,
+      nextPaymentDueDate: resolvedPaidUntilForSync,
+      nextPaymentDate: resolvedPaidUntilForSync,
+      lastPaymentDate: monthPaidAmountForSync > 0 ? billingDateTimeForSync : undefined,
+    };
+
+    setState((prev: typeof state) => {
+      let liveRoom: Room | undefined;
+      let liveBed: Bed | undefined;
+
+      if (placement?.roomId && placement?.bedId) {
+        liveRoom = prev.rooms.find((r: Room) => r.id === placement.roomId);
+        liveBed = liveRoom?.beds.find((b: Bed) => b.id === placement.bedId);
+        if (
+          !liveRoom ||
+          !liveBed ||
+          liveRoom.status === 'maintenance' ||
+          liveRoom.status === 'closed' ||
+          liveBed.status !== 'available'
+        ) {
+          return prev;
+        }
+      }
+
+      const rawType: RoomType =
+        liveRoom?.type ||
+        (resident.roomType && (resident.roomType as string) !== 'lux_plus' ? resident.roomType : 'comfort');
+      const baseTierTariff =
+        prev.settings.roomTariffs?.[rawType] ??
+        liveRoom?.priceMonthly ??
+        resident.monthlyTariff ??
+        INITIAL_SETTINGS.roomTariffs[rawType];
+      const overrideRate =
+        initialBilling?.monthlyRateOverride && initialBilling.monthlyRateOverride > 0
+          ? safeAmount(initialBilling.monthlyRateOverride)
+          : undefined;
+      const resolvedTariff = overrideRate ?? baseTierTariff;
+
+      const bedLabel = liveBed ? liveBed.bedIdentifier || String(liveBed.bedNumber) : undefined;
+      const contractNumber =
+        liveRoom && bedLabel ? `RC-2026/${liveRoom.roomNumber}-${bedLabel}` : undefined;
+
+      const updatedRooms =
+        liveRoom && liveBed
+          ? prev.rooms.map((r: Room) => {
+              if (r.id !== liveRoom!.id) return r;
+              return {
+                ...r,
+                beds: r.beds.map((b: Bed) =>
+                  b.id === liveBed!.id
+                    ? {
+                        ...b,
+                        status: 'occupied' as const,
+                        studentId: newId,
+                        studentName: resident.fullName.trim(),
+                        assignedAt: todayStr,
+                      }
+                    : b
+                ),
+              };
+            })
+          : prev.rooms;
+
+      const newContract: Contract | undefined =
+        liveRoom && liveBed && bedLabel && contractNumber
+          ? {
+              id: `cnt-${Date.now()}`,
+              contractNumber,
+              studentId: newId,
+              studentName: resident.fullName.trim(),
+              passportNumber: resident.passportNumber.trim().toUpperCase(),
+              roomNumber: liveRoom.roomNumber,
+              bedNumber: liveBed.bedNumber,
+              bedIdentifier: bedLabel,
+              roomType: rawType,
+              tariffMonthly: resolvedTariff,
+              startDate: todayStr,
+              endDate: '2027-06-30',
+              status: 'active',
+              createdAt: todayStr,
+              pdfGeneratedAt: nowIso.replace('T', ' ').slice(0, 16),
+            }
+          : undefined;
+
+      const nextContracts = newContract ? [newContract, ...prev.contracts] : prev.contracts;
+
+      const billingDateTime = billingDateTimeForSync;
+      const billingDateOnly = billingDateOnlyForSync;
+      const billingTime = billingTimeForSync;
+      const billingMethod: BillingPaymentMethod = billingMethodForSync;
+      const billingNotes = billingNotesForSync;
+
+      const targetPeriod = targetPeriodForSync;
+      const rawMonthStatus = rawMonthStatusForSync;
+      const monthPaidAmount =
+        rawMonthStatus === 'paid'
+          ? resolvedTariff
+          : rawMonthStatus === 'partial'
+          ? safeAmount(initialBilling?.monthAmount)
+          : 0;
+      const resolvedPaidUntil =
+        monthPaidAmount > 0
+          ? isValidIsoDate(initialBilling?.paidUntil)
+            ? initialBilling!.paidUntil!.trim()
+            : addDaysToDateStr(billingDateTime, 30)
+          : undefined;
+
+      const monthsMap: Record<string, MonthlyBillingEntry> = {};
+      ACADEMIC_BILLING_MONTHS.forEach((m) => {
+        if (m.period === targetPeriod && monthPaidAmount > 0) {
+          monthsMap[m.period] = {
+            period: m.period,
+            paidAmount: monthPaidAmount,
+            status:
+              resolvedTariff > 0 && monthPaidAmount >= resolvedTariff
+                ? 'paid'
+                : 'partial',
+            paymentDate: billingDateTime,
+            paidUntil: resolvedPaidUntil,
+            paymentMethod: billingMethod,
+            notes: billingNotes,
+            updatedAt: nowIso,
+          };
+        } else {
+          monthsMap[m.period] = {
+            period: m.period,
+            status: 'pending',
+            paidAmount: 0,
+          };
+        }
+      });
+
+      const newLedger: StudentBillingLedger = {
+        studentId: newId,
+        ...(overrideRate ? { monthlyRateOverride: overrideRate } : {}),
+        ...(resolvedPaidUntil ? { paidUntil: resolvedPaidUntil } : {}),
+        months: monthsMap,
+        updatedAt: nowIso,
+      };
+      const nextBillingLedgers: Record<string, StudentBillingLedger> = {
+        ...(prev.billingLedgers || {}),
+        [newId]: newLedger,
+      };
+
+      const initialPayments: Payment[] = [];
+      const roomNumDisplay = liveRoom?.roomNumber || '---';
+      if (monthPaidAmount > 0) {
+        initialPayments.push({
+          id: initialPaymentId,
+          studentId: newId,
+          studentName: resident.fullName.trim(),
+          floor: liveRoom?.floor,
+          roomNumber: roomNumDisplay,
+          bedLabel,
+          amount: monthPaidAmount,
+          paymentDate: billingDateTime,
+          paymentTime: billingTime,
+          date: billingDateOnly,
+          paidUntil: resolvedPaidUntil,
+          type: 'income',
+          periodMonth: targetPeriod,
+          itemRemainingAfter: Math.max(0, resolvedTariff - monthPaidAmount),
+          paymentMethod: billingMethod,
+          recordedBy: currentUserName,
+          status: 'completed',
+          notes: billingNotes,
+        });
+      }
+
+      const nextPayments = [...initialPayments, ...prev.payments].sort(comparePaymentsChronoDesc);
+
+      const baseStudent: Student = {
+        ...previewStudent,
+        roomId: liveRoom?.id,
+        bedId: liveBed?.id,
+        roomNumber: liveRoom?.roomNumber,
+        bedNumber: liveBed?.bedNumber,
+        bedIdentifier: bedLabel,
+        floor: liveRoom?.floor,
+        roomType: rawType,
+        monthlyTariff: resolvedTariff,
+        lastPaymentDate: monthPaidAmount > 0 ? billingDateTime : undefined,
+      };
+
+      const summary = computeStudentBillingSummary({
+        entityId: baseStudent.id,
+        student: baseStudent,
+        contract: newContract,
+        rooms: updatedRooms,
+        settings: prev.settings,
+        payments: nextPayments,
+        ledger: newLedger,
+      });
+
+      const computedPaidUntil = summary.paidUntilDate || '';
+      const expiryInfo = computePaymentExpiryInfo(computedPaidUntil);
+      const computedPaymentStatus: 'paid' | 'due_soon' | 'overdue' =
+        expiryInfo.status === 'overdue'
+          ? 'overdue'
+          : expiryInfo.status === 'expiring_soon'
+          ? 'due_soon'
+          : expiryInfo.status === 'active'
+          ? 'paid'
+          : summary.remainingBalance > 0
+          ? 'overdue'
+          : 'paid';
+
+      const finalStudent: Student = {
+        ...baseStudent,
+        monthlyTariff: summary.monthlyRate,
+        debtAmount: summary.remainingBalance,
+        paymentStatus: computedPaymentStatus,
+        paidUntil: computedPaidUntil,
+        nextPaymentDueDate: computedPaidUntil,
+        nextPaymentDate: computedPaidUntil,
+      };
+
+      const existingAccounts: StoredUserAccount[] = Array.isArray(prev.userAccounts) ? prev.userAccounts : [];
+      const existingAccountIdx = existingAccounts.findIndex(
+        (acc) =>
+          acc.studentId === newId ||
+          (phoneKey.length >= 7 && normalizePhoneKey(acc.phone) === phoneKey)
+      );
+      const nextAccount: StoredUserAccount = {
+        id: existingAccountIdx >= 0 ? existingAccounts[existingAccountIdx].id : `acct-${Date.now()}`,
+        identifier: phoneKey || tempLogin.toLowerCase(),
+        login: existingAccountIdx >= 0 ? existingAccounts[existingAccountIdx].login : undefined,
+        phone: tempLogin,
+        role: 'student',
+        studentId: newId,
+        passwordHash,
+        passwordSalt: salt,
+        updatedAt: nowIso,
+      };
+      const nextUserAccounts =
+        existingAccountIdx >= 0
+          ? existingAccounts.map((acc, idx) => (idx === existingAccountIdx ? nextAccount : acc))
+          : [nextAccount, ...existingAccounts];
+
+      const notifMessage = liveRoom && bedLabel
+        ? `${finalStudent.fullName}: ${liveRoom.roomNumber}-xona, ${bedLabel}-yotoqqa ro‘yxatga olindi.`
+        : `${finalStudent.fullName} rezident sifatida ro‘yxatga olindi.`;
+
+      const residentNotif: NotificationItem = {
+        id: `notif-resident-${Date.now()}`,
+        type: 'application',
+        title: 'Yangi rezident qo‘shildi',
+        message: notifMessage,
+        date: nowIso.replace('T', ' ').slice(0, 16),
+        isRead: false,
+        recipientRole: 'all',
+        studentId: newId,
+      };
+
+      return {
+        ...prev,
+        rooms: updatedRooms,
+        students: [finalStudent, ...prev.students],
+        contracts: nextContracts,
+        payments: nextPayments,
+        billingLedgers: nextBillingLedgers,
+        userAccounts: nextUserAccounts,
+        notifications: [residentNotif, ...prev.notifications],
+      };
+    });
+
+    await syncCreateResidentWithPlacement({
+      student: studentForSync,
+      bedId: preBed?.id,
+      initialPayments: initialPaymentsForSync,
+    });
+
+    addAudit(
+      'Yangi rezident qo\'shildi',
+      'Student',
+      newId,
+      undefined,
+      `${resident.fullName.trim()}${
+        preRoom && preBedLabel ? ` (${preRoom.roomNumber}-xona · ${preBedLabel})` : ''
+      }`
+    );
+
+    return {
+      student: studentForSync,
+      tempLogin,
+      tempPassword,
+      roomNumber: preRoom?.roomNumber,
+      bedLabel: preBedLabel,
+      floor: preRoom?.floor,
+      contractNumber: preContractNumber,
+    };
   };
 
   const updateStudent = (id: string, updates: Partial<Student>) => {
@@ -734,10 +1359,14 @@ export const DormProvider: React.FC<{ children: React.ReactNode }> = ({ children
       return;
     }
 
+    const existing = students.find((s: Student) => s.id === id);
     setState((prev: typeof state) => {
       const updated = prev.students.map((s: Student) => (s.id === id ? { ...s, ...updates } : s));
       return { ...prev, students: updated };
     });
+    if (existing) {
+      void syncUpsertResident({ ...existing, ...updates });
+    }
     addAudit('Talaba tahrirlandi', 'Student', id, undefined, JSON.stringify(updates));
   };
 
@@ -747,43 +1376,274 @@ export const DormProvider: React.FC<{ children: React.ReactNode }> = ({ children
       return;
     }
 
-    // 3-month retention logic
-    const deletedDate = new Date().toISOString().slice(0, 10);
+    const stdForSync = students.find((s: Student) => s.id === id);
+    const linkedAppIdsForSync = new Set<string>();
+    if (stdForSync?.applicationId) {
+      linkedAppIdsForSync.add(stdForSync.applicationId);
+    }
+    applications.forEach((a: Application) => {
+      if (a.studentId === id || (stdForSync?.applicationId && a.id === stdForSync.applicationId)) {
+        linkedAppIdsForSync.add(a.id);
+      }
+    });
+
+    let auditDetail = '';
     setState((prev: typeof state) => {
-      const updatedStudents = prev.students.map((s: Student) => {
-        if (s.id === id) {
-          return {
-            ...s,
-            status: 'deleted_pending_purge' as const,
-            deletedAt: deletedDate,
-          };
+      const std = prev.students.find((s: Student) => s.id === id);
+      const linkedAppIds = new Set<string>();
+      if (std?.applicationId) {
+        linkedAppIds.add(std.applicationId);
+      }
+      prev.applications.forEach((a: Application) => {
+        if (a.studentId === id || (std?.applicationId && a.id === std.applicationId)) {
+          linkedAppIds.add(a.id);
         }
-        return s;
       });
 
-      // Also release their bed if occupied
-      const std = prev.students.find((s: Student) => s.id === id);
-      let updatedRooms = prev.rooms;
-      if (std && std.bedId) {
-        updatedRooms = prev.rooms.map((r: Room) => ({
-          ...r,
-          beds: r.beds.map((b) => (b.id === std.bedId ? { ...b, status: 'available' as const, studentId: undefined, studentName: undefined } : b)),
-        }));
+      if (std) {
+        auditDetail = std.roomNumber
+          ? `${std.fullName} (${std.roomNumber}-xona${std.bedIdentifier || std.bedNumber ? ` · ${std.bedIdentifier || std.bedNumber}` : ''})`
+          : std.fullName;
       }
 
-      return {
+      // 1. Remove resident record cleanly
+      const updatedStudents = prev.students.filter((s: Student) => s.id !== id);
+
+      // 2. Automatically release any assigned bed back to Available across Floors 2–5
+      const updatedRooms = prev.rooms.map((r: Room) => {
+        let changed = false;
+        const beds = r.beds.map((b: Bed) => {
+          if ((std?.bedId && b.id === std.bedId) || b.studentId === id) {
+            changed = true;
+            return {
+              ...b,
+              status: 'available' as const,
+              studentId: undefined,
+              studentName: undefined,
+              assignedAt: undefined,
+            };
+          }
+          return b;
+        });
+        return changed ? { ...r, beds } : r;
+      });
+
+      // 3. Remove linked applications so no orphan applicant/billing entry remains
+      const updatedApplications = prev.applications.filter(
+        (a: Application) => a.studentId !== id && !linkedAppIds.has(a.id)
+      );
+
+      // 4. Clear linked payment entries and billing ledgers
+      const updatedPayments = prev.payments.filter(
+        (p: Payment) => p.studentId !== id && !linkedAppIds.has(p.studentId)
+      );
+      const nextBillingLedgers: Record<string, StudentBillingLedger> = {
+        ...(prev.billingLedgers || {}),
+      };
+      delete nextBillingLedgers[id];
+      linkedAppIds.forEach((appId) => {
+        delete nextBillingLedgers[appId];
+      });
+
+      // 5. Remove linked contracts, discipline records, and student portal accounts
+      const updatedContracts = prev.contracts.filter((c: Contract) => c.studentId !== id);
+      const updatedDiscipline = prev.disciplineRecords.filter((d: DisciplineRecord) => d.studentId !== id);
+      const phoneKey = std?.phone ? normalizePhoneKey(std.phone) : '';
+      const updatedUserAccounts = (prev.userAccounts || []).filter(
+        (u: StoredUserAccount) =>
+          !(
+            u.role === 'student' &&
+            (u.studentId === id ||
+              (u.applicationId && linkedAppIds.has(u.applicationId)) ||
+              (phoneKey.length >= 7 &&
+                (normalizePhoneKey(u.phone) === phoneKey ||
+                  (u.login && normalizePhoneKey(u.login) === phoneKey) ||
+                  normalizePhoneKey(u.identifier) === phoneKey)))
+          )
+      );
+
+      const nextState = {
         ...prev,
         students: updatedStudents,
         rooms: updatedRooms,
+        applications: updatedApplications,
+        payments: updatedPayments,
+        billingLedgers: nextBillingLedgers,
+        contracts: updatedContracts,
+        disciplineRecords: updatedDiscipline,
+        userAccounts: updatedUserAccounts,
       };
+
+      // Immediately persist updated state to localStorage
+      try {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(nextState));
+      } catch (e) {
+        console.error('Failed to persist resident deletion to localStorage', e);
+      }
+
+      return nextState;
     });
-    addAudit('Talaba o\'chirildi (Retention 3 oy)', 'Student', id);
+
+    void syncDeleteResidentCascade({
+      residentId: id,
+      bedId: stdForSync?.bedId,
+      linkedAppIds: Array.from(linkedAppIdsForSync),
+    });
+
+    if (activeStudentId === id) {
+      setActiveStudentId('');
+    }
+    addAudit('Rezident o‘chirildi va o‘rni bo‘shatildi', 'Student', id, auditDetail || id);
+  };
+
+  const deleteApplication = (appId: string) => {
+    if (role === 'security') {
+      console.warn('Security role is not permitted to delete applications.');
+      return;
+    }
+
+    const targetAppForSync = applications.find((a: Application) => a.id === appId);
+    const linkedStudentsForSync = students.filter(
+      (s: Student) =>
+        s.applicationId === appId || (targetAppForSync?.studentId && s.id === targetAppForSync.studentId)
+    );
+    const linkedStudentIdsForSync = Array.from(
+      new Set<string>([
+        ...linkedStudentsForSync.map((s: Student) => s.id),
+        ...(targetAppForSync?.studentId ? [targetAppForSync.studentId] : []),
+      ])
+    );
+    const linkedBedIdsForSync: string[] = linkedStudentsForSync
+      .map((s: Student) => s.bedId)
+      .filter((bid: string | undefined): bid is string => Boolean(bid));
+
+    let linkedStdIdToClear = '';
+    setState((prev: typeof state) => {
+      const targetApp = prev.applications.find((a: Application) => a.id === appId);
+      const linkedStudents = prev.students.filter(
+        (s: Student) => s.applicationId === appId || (targetApp?.studentId && s.id === targetApp.studentId)
+      );
+      const linkedStudentIds = new Set<string>(linkedStudents.map((s: Student) => s.id));
+      if (targetApp?.studentId) {
+        linkedStudentIds.add(targetApp.studentId);
+      }
+      if (linkedStudentIds.has(activeStudentId)) {
+        linkedStdIdToClear = activeStudentId;
+      }
+
+      const linkedBedIds = new Set<string>();
+      linkedStudents.forEach((s: Student) => {
+        if (s.bedId) linkedBedIds.add(s.bedId);
+      });
+
+      const updatedRooms = prev.rooms.map((r: Room) => {
+        let changed = false;
+        const beds = r.beds.map((b: Bed) => {
+          if (linkedBedIds.has(b.id) || (b.studentId && linkedStudentIds.has(b.studentId))) {
+            changed = true;
+            return {
+              ...b,
+              status: 'available' as const,
+              studentId: undefined,
+              studentName: undefined,
+              assignedAt: undefined,
+            };
+          }
+          return b;
+        });
+        return changed ? { ...r, beds } : r;
+      });
+
+      const updatedStudents = prev.students.filter((s: Student) => !linkedStudentIds.has(s.id));
+      const updatedApplications = prev.applications.filter((a: Application) => a.id !== appId);
+      const updatedPayments = prev.payments.filter(
+        (p: Payment) => p.studentId !== appId && !linkedStudentIds.has(p.studentId)
+      );
+      const nextBillingLedgers: Record<string, StudentBillingLedger> = {
+        ...(prev.billingLedgers || {}),
+      };
+      delete nextBillingLedgers[appId];
+      linkedStudentIds.forEach((sid) => {
+        delete nextBillingLedgers[sid];
+      });
+      const updatedContracts = prev.contracts.filter(
+        (c: Contract) => !linkedStudentIds.has(c.studentId)
+      );
+      const updatedDiscipline = prev.disciplineRecords.filter(
+        (d: DisciplineRecord) => !linkedStudentIds.has(d.studentId)
+      );
+      const appPhoneKey = targetApp?.phone ? normalizePhoneKey(targetApp.phone) : '';
+      const updatedUserAccounts = (prev.userAccounts || []).filter(
+        (u: StoredUserAccount) =>
+          !(
+            u.role === 'student' &&
+            ((u.studentId && linkedStudentIds.has(u.studentId)) ||
+              u.applicationId === appId ||
+              (appPhoneKey.length >= 7 &&
+                (normalizePhoneKey(u.phone) === appPhoneKey ||
+                  (u.login && normalizePhoneKey(u.login) === appPhoneKey) ||
+                  normalizePhoneKey(u.identifier) === appPhoneKey)))
+          )
+      );
+
+      const nextState = {
+        ...prev,
+        students: updatedStudents,
+        rooms: updatedRooms,
+        applications: updatedApplications,
+        payments: updatedPayments,
+        billingLedgers: nextBillingLedgers,
+        contracts: updatedContracts,
+        disciplineRecords: updatedDiscipline,
+        userAccounts: updatedUserAccounts,
+      };
+
+      try {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(nextState));
+      } catch (e) {
+        console.error('Failed to persist application deletion to localStorage', e);
+      }
+
+      return nextState;
+    });
+
+    void syncDeleteApplicationCascade({
+      applicationId: appId,
+      linkedStudentIds: linkedStudentIdsForSync,
+      linkedBedIds: linkedBedIdsForSync,
+    });
+
+    if (linkedStdIdToClear) {
+      setActiveStudentId('');
+    }
+    addAudit('Ariza o‘chirildi', 'Application', appId);
   };
 
   const submitApplication = (appData: Omit<Application, 'id' | 'submittedAt' | 'status'>): Application => {
+    // Generate unique Application ID in format RC-2026-XXXX
+    const existingIds = new Set(applications.map((a: Application) => a.id.toUpperCase()));
+    let generatedId = '';
+    for (let attempt = 0; attempt < 20; attempt++) {
+      const randNum = Math.floor(1000 + Math.random() * 9000);
+      const candidate = `RC-2026-${randNum}`;
+      if (!existingIds.has(candidate)) {
+        generatedId = candidate;
+        break;
+      }
+    }
+    if (!generatedId) {
+      generatedId = `RC-2026-${String(Date.now()).slice(-4)}`;
+    }
+
+    const prefType: RoomType | undefined = appData.preferredRoomType;
+    const resolvedMonthlyTariff =
+      appData.monthlyTariff ??
+      (prefType ? settings.roomTariffs?.[prefType] ?? INITIAL_SETTINGS.roomTariffs[prefType] : undefined);
+
     const newApp: Application = {
       ...appData,
-      id: `app-${Date.now()}`,
+      id: generatedId,
+      monthlyTariff: resolvedMonthlyTariff,
       status: 'new',
       submittedAt: new Date().toISOString().replace('T', ' ').slice(0, 16),
     };
@@ -796,7 +1656,7 @@ export const DormProvider: React.FC<{ children: React.ReactNode }> = ({ children
           id: `notif-${Date.now()}`,
           type: 'application',
           title: 'Yangi Ariza kelib tushdi',
-          message: `${newApp.fullName} yotoqxonaga a'zo bo'lish uchun ariza topshirdi.`,
+          message: `${newApp.fullName} (${newApp.id}) yotoqxonaga a'zo bo'lish uchun ariza topshirdi.`,
           date: new Date().toISOString().replace('T', ' ').slice(0, 16),
           isRead: false,
           recipientRole: 'receptionist',
@@ -805,23 +1665,167 @@ export const DormProvider: React.FC<{ children: React.ReactNode }> = ({ children
       ],
     }));
 
+    void syncUpsertApplication(newApp, null);
     addAudit('Online ariza topshirildi', 'Application', newApp.id, undefined, newApp.fullName);
     return newApp;
   };
 
-  const reviewApplication = (id: string, status: ApplicationStatus, notes?: string) => {
+  const reviewApplication = (id: string, status: ApplicationStatus, notes?: string): string | undefined => {
     if (role === 'security') {
       console.warn('Security role is not permitted to review applications.');
-      return;
+      return undefined;
+    }
+
+    const targetApp = applications.find((app: Application) => app.id === id);
+    let linkedStudentId = targetApp?.studentId;
+    let newStudentToCreate: Student | null = null;
+    let existingStudentMatchId: string | undefined;
+
+    if (status === 'approved' && targetApp) {
+      const targetPhoneKey = normalizePhoneKey(targetApp.phone);
+      const targetPassportLower = targetApp.passportNumber.trim().toLowerCase();
+      const existingStudent = students.find(
+        (s: Student) =>
+          s.status !== 'deleted_pending_purge' &&
+          ((targetApp.studentId && s.id === targetApp.studentId) ||
+            (targetPassportLower && s.passportNumber.trim().toLowerCase() === targetPassportLower) ||
+            (targetPhoneKey.length >= 7 && normalizePhoneKey(s.phone) === targetPhoneKey) ||
+            s.fullName === targetApp.fullName)
+      );
+
+      if (existingStudent) {
+        linkedStudentId = existingStudent.id;
+        existingStudentMatchId = existingStudent.id;
+      } else {
+        const prefType: RoomType = targetApp.preferredRoomType || 'comfort';
+        const resolvedTariff =
+          targetApp.monthlyTariff ??
+          settings.roomTariffs?.[prefType] ??
+          INITIAL_SETTINGS.roomTariffs[prefType] ??
+          1200000;
+        const newStudentId = `std-${Date.now()}`;
+        linkedStudentId = newStudentId;
+        newStudentToCreate = {
+          id: newStudentId,
+          applicationId: targetApp.id,
+          fullName: targetApp.fullName,
+          phone: targetApp.phone,
+          birthDate: targetApp.birthDate,
+          passportNumber: targetApp.passportNumber,
+          passportFrontUrl: targetApp.passportFrontUrl,
+          passportBackUrl: targetApp.passportBackUrl,
+          university: targetApp.university,
+          faculty: targetApp.faculty,
+          degreeLevel: targetApp.degreeLevel,
+          course: targetApp.course,
+          group: targetApp.group,
+          parentPhone: targetApp.parentPhone,
+          permanentAddress: targetApp.permanentAddress,
+          status: 'active',
+          roomType: prefType,
+          monthlyTariff: resolvedTariff,
+          paidUntil: '',
+          nextPaymentDueDate: '',
+          debtAmount: 0,
+          createdAt: new Date().toISOString().slice(0, 10),
+          telegramChatId: `tg_${Date.now()}`,
+        };
+      }
     }
 
     setState((prev: typeof state) => {
-      const targetApp = prev.applications.find((app: Application) => app.id === id);
+      let updatedStudents = prev.students;
+      let nextBillingLedgers: Record<string, StudentBillingLedger> = {
+        ...(prev.billingLedgers || {}),
+      };
+      let nextPayments = prev.payments;
+
+      if (status === 'approved' && targetApp && linkedStudentId) {
+        if (nextBillingLedgers[targetApp.id] && !nextBillingLedgers[linkedStudentId]) {
+          nextBillingLedgers = {
+            ...nextBillingLedgers,
+            [linkedStudentId]: {
+              ...nextBillingLedgers[targetApp.id],
+              studentId: linkedStudentId,
+            },
+          };
+          delete nextBillingLedgers[targetApp.id];
+        }
+        nextPayments = prev.payments.map((p: Payment) =>
+          p.studentId === targetApp.id ? { ...p, studentId: linkedStudentId! } : p
+        );
+
+        const baseStudent: Student = existingStudentMatchId
+          ? {
+              ...(prev.students.find((s: Student) => s.id === existingStudentMatchId) as Student),
+              status: 'active' as const,
+              applicationId:
+                prev.students.find((s: Student) => s.id === existingStudentMatchId)?.applicationId ||
+                targetApp.id,
+              degreeLevel:
+                prev.students.find((s: Student) => s.id === existingStudentMatchId)?.degreeLevel ||
+                targetApp.degreeLevel,
+            }
+          : (newStudentToCreate as Student);
+
+        const activeCnt = prev.contracts.find(
+          (c: Contract) => c.studentId === baseStudent.id && c.status === 'active'
+        );
+        const approvedAppSnapshot: Application = {
+          ...targetApp,
+          status: 'approved',
+          studentId: linkedStudentId,
+        };
+        const summary = computeStudentBillingSummary({
+          entityId: baseStudent.id,
+          student: baseStudent,
+          application: approvedAppSnapshot,
+          contract: activeCnt,
+          rooms: prev.rooms,
+          settings: prev.settings,
+          payments: nextPayments,
+          ledger: nextBillingLedgers[baseStudent.id],
+        });
+        const computedPaidUntil = summary.paidUntilDate || '';
+        const expiryInfo = computePaymentExpiryInfo(computedPaidUntil);
+        const computedPaymentStatus: 'paid' | 'due_soon' | 'overdue' =
+          expiryInfo.status === 'overdue'
+            ? 'overdue'
+            : expiryInfo.status === 'expiring_soon'
+            ? 'due_soon'
+            : expiryInfo.status === 'active'
+            ? 'paid'
+            : summary.remainingBalance > 0
+            ? 'overdue'
+            : 'paid';
+        const syncedStudent: Student = {
+          ...baseStudent,
+          monthlyTariff: summary.monthlyRate,
+          debtAmount: summary.remainingBalance,
+          paymentStatus: computedPaymentStatus,
+          paidUntil: computedPaidUntil,
+          nextPaymentDueDate: computedPaidUntil,
+          nextPaymentDate: computedPaidUntil,
+        };
+
+        if (existingStudentMatchId) {
+          updatedStudents = prev.students.map((s: Student) =>
+            s.id === existingStudentMatchId ? syncedStudent : s
+          );
+        } else if (newStudentToCreate) {
+          const alreadyExists = prev.students.some((s: Student) => s.id === newStudentToCreate!.id);
+          if (!alreadyExists) {
+            updatedStudents = [syncedStudent, ...prev.students];
+          }
+        }
+      }
+
       const updated = prev.applications.map((app: Application) => {
         if (app.id === id) {
           return {
             ...app,
             status,
+            studentId: linkedStudentId || app.studentId,
             reviewNotes: notes || app.reviewNotes,
             reviewedBy: currentUserName,
           };
@@ -829,79 +1833,187 @@ export const DormProvider: React.FC<{ children: React.ReactNode }> = ({ children
         return app;
       });
 
-      let updatedStudents = prev.students;
-      if (status === 'approved' && targetApp) {
-        const existingStudent = prev.students.find(
-          (s: Student) => s.passportNumber === targetApp.passportNumber || s.fullName === targetApp.fullName
-        );
-        if (!existingStudent) {
-          const prefType: RoomType = targetApp.preferredRoomType || 'comfort';
-          const resolvedTariff =
-            prev.settings.roomTariffs?.[prefType] ?? INITIAL_SETTINGS.roomTariffs[prefType] ?? 1200000;
-          const newStudent: Student = {
-            id: `std-${Date.now()}`,
-            fullName: targetApp.fullName,
-            phone: targetApp.phone,
-            birthDate: targetApp.birthDate,
-            passportNumber: targetApp.passportNumber,
-            passportFrontUrl: targetApp.passportFrontUrl,
-            passportBackUrl: targetApp.passportBackUrl,
-            university: targetApp.university,
-            faculty: targetApp.faculty,
-            course: targetApp.course,
-            group: targetApp.group,
-            parentPhone: targetApp.parentPhone,
-            permanentAddress: targetApp.permanentAddress,
-            status: 'active',
-            roomType: prefType,
-            monthlyTariff: resolvedTariff,
-            paidUntil: '2026-10-31',
-            nextPaymentDueDate: '2026-11-01',
-            debtAmount: 0,
-            createdAt: new Date().toISOString().slice(0, 10),
-            telegramChatId: `tg_${Date.now()}`,
-          };
-          updatedStudents = [newStudent, ...prev.students];
-        }
-      }
-
-      return { ...prev, applications: updated, students: updatedStudents };
+      return {
+        ...prev,
+        applications: updated,
+        students: updatedStudents,
+        billingLedgers: nextBillingLedgers,
+        payments: nextPayments,
+      };
     });
 
+    void (async () => {
+      await syncUpdateApplication(id, { status });
+      if (status === 'approved' && targetApp && linkedStudentId) {
+        const existingStd = existingStudentMatchId
+          ? students.find((s: Student) => s.id === existingStudentMatchId)
+          : undefined;
+        const residentToSave: Student | undefined = existingStd
+          ? {
+              ...existingStd,
+              status: 'active',
+              applicationId: existingStd.applicationId || targetApp.id,
+              degreeLevel: existingStd.degreeLevel || targetApp.degreeLevel,
+            }
+          : newStudentToCreate || undefined;
+        if (residentToSave) {
+          await syncUpsertResident(residentToSave);
+        }
+      }
+    })();
+
     addAudit(`Ariza ko'rib chiqildi (${status})`, 'Application', id, undefined, notes);
+    return linkedStudentId;
   };
 
-  const assignBed = (studentId: string, roomId: string, bedId: string) => {
+  const assignBed = async (
+    studentId: string,
+    roomId: string,
+    bedId: string,
+    initialBilling?: InitialBillingSetup
+  ): Promise<{ tempLogin: string; tempPassword: string; roomNumber: string; bedLabel: string } | null> => {
     if (role === 'security') {
       console.warn('Security role is not permitted to assign beds.');
-      return;
+      return null;
     }
 
+    const targetStudent: Student | undefined = students.find((s: Student) => s.id === studentId);
+    const targetRoom: Room | undefined = rooms.find((r: Room) => r.id === roomId);
+    if (!targetStudent || !targetRoom) return null;
+
+    const targetBed: Bed | undefined = targetRoom.beds.find((b: Bed) => b.id === bedId);
+    if (!targetBed) return null;
+
+    if (targetBed.status === 'occupied' && targetBed.studentId && targetBed.studentId !== studentId) {
+      console.warn('Cannot assign student: this bed is already occupied by another student.');
+      return null;
+    }
+    if (targetBed.status === 'maintenance' || targetRoom.status === 'maintenance' || targetRoom.status === 'closed') {
+      console.warn('Cannot assign student: bed or room is under maintenance.');
+      return null;
+    }
+
+    const bedLabel = targetBed.bedIdentifier || String(targetBed.bedNumber);
+    const phoneKey = normalizePhoneKey(targetStudent.phone);
+    const tempLogin = phoneKey.length >= 9 ? formatUzPhoneDisplay(targetStudent.phone) : targetStudent.phone;
+    const tempPassword = generateTempPassword();
+    const salt = generateSalt();
+    const passwordHash = await hashPassword(tempPassword, salt);
+    const nowIso = new Date().toISOString();
+    const todayStr = nowIso.slice(0, 10);
+
+    const assignPaymentId = `PAY-${Date.now() + 1}-MO`;
+    const oldBedIdForSync = targetStudent.bedId;
+    const baseTierTariffForSync =
+      settings.roomTariffs?.[targetRoom.type] ??
+      targetRoom.priceMonthly ??
+      INITIAL_SETTINGS.roomTariffs[targetRoom.type];
+    const overrideRateForSync =
+      initialBilling?.monthlyRateOverride && initialBilling.monthlyRateOverride > 0
+        ? safeAmount(initialBilling.monthlyRateOverride)
+        : undefined;
+    const computedMonthlyTariffForSync = overrideRateForSync ?? baseTierTariffForSync;
+
+    const targetPassportLowerForSync = targetStudent.passportNumber.trim().toLowerCase();
+    const matchedAppForSync = applications.find(
+      (a: Application) =>
+        a.id === targetStudent.applicationId ||
+        a.studentId === targetStudent.id ||
+        (phoneKey.length >= 7 && normalizePhoneKey(a.phone) === phoneKey) ||
+        (targetPassportLowerForSync &&
+          a.passportNumber.trim().toLowerCase() === targetPassportLowerForSync)
+    );
+
+    const initialPaymentsForSync: Payment[] = [];
+    let replacedPeriodForSync: string | undefined;
+    let resolvedPaidUntilForSync: string | undefined;
+    if (initialBilling) {
+      const billingDateTime = ensureDateTimeValue(initialBilling.paymentDate);
+      const billingDateOnly = extractDatePart(billingDateTime) || todayStr;
+      const billingTime = extractTimePart(billingDateTime);
+      const billingMethod: BillingPaymentMethod =
+        normalizeBillingMethod(initialBilling.paymentMethod) || 'cash';
+      const billingNotes = initialBilling.notes?.trim() || undefined;
+      const targetPeriod = initialBilling.initialPeriod || getCurrentBillingPeriod();
+      replacedPeriodForSync = targetPeriod;
+      const rawMonthStatus = initialBilling.monthStatus || 'pending';
+      const monthPaid =
+        rawMonthStatus === 'paid'
+          ? computedMonthlyTariffForSync
+          : rawMonthStatus === 'partial'
+          ? safeAmount(initialBilling.monthAmount)
+          : 0;
+      if (monthPaid > 0) {
+        resolvedPaidUntilForSync = isValidIsoDate(initialBilling.paidUntil)
+          ? initialBilling.paidUntil!.trim()
+          : addDaysToDateStr(billingDateTime, 30);
+        initialPaymentsForSync.push({
+          id: assignPaymentId,
+          studentId: targetStudent.id,
+          studentName: targetStudent.fullName,
+          floor: targetRoom.floor,
+          roomNumber: targetRoom.roomNumber,
+          bedLabel,
+          amount: monthPaid,
+          paymentDate: billingDateTime,
+          paymentTime: billingTime,
+          date: billingDateOnly,
+          paidUntil: resolvedPaidUntilForSync,
+          type: 'income',
+          periodMonth: targetPeriod,
+          itemRemainingAfter: Math.max(0, computedMonthlyTariffForSync - monthPaid),
+          paymentMethod: billingMethod,
+          recordedBy: currentUserName,
+          status: 'completed',
+          notes: billingNotes,
+        });
+      }
+    }
+
+    const existingPaidUntilCandidates = [
+      targetStudent.paidUntil,
+      billingLedgers[targetStudent.id]?.paidUntil,
+      resolvedPaidUntilForSync,
+    ]
+      .filter((d): d is string => Boolean(d && isValidIsoDate(d)))
+      .sort();
+    const finalPaidUntilForSync =
+      existingPaidUntilCandidates.length > 0
+        ? existingPaidUntilCandidates[existingPaidUntilCandidates.length - 1]
+        : '';
+
+    const studentForSync: Student = {
+      ...targetStudent,
+      status: 'active',
+      applicationId: targetStudent.applicationId || matchedAppForSync?.id,
+      roomId,
+      bedId,
+      roomNumber: targetRoom.roomNumber,
+      bedNumber: targetBed.bedNumber,
+      bedIdentifier: bedLabel,
+      floor: targetRoom.floor,
+      roomType: targetRoom.type,
+      monthlyTariff: computedMonthlyTariffForSync,
+      paidUntil: finalPaidUntilForSync,
+      nextPaymentDueDate: finalPaidUntilForSync,
+      nextPaymentDate: finalPaidUntilForSync,
+      tempLogin,
+      tempPassword,
+    };
+
     setState((prev: typeof state) => {
-      const targetStudent: Student | undefined = prev.students.find((s: Student) => s.id === studentId);
-      const targetRoom: Room | undefined = prev.rooms.find((r: Room) => r.id === roomId);
-      if (!targetStudent || !targetRoom) return prev;
+      const liveStudent: Student | undefined = prev.students.find((s: Student) => s.id === studentId);
+      const liveRoom: Room | undefined = prev.rooms.find((r: Room) => r.id === roomId);
+      if (!liveStudent || !liveRoom) return prev;
+      const liveBed: Bed | undefined = liveRoom.beds.find((b: Bed) => b.id === bedId);
+      if (!liveBed) return prev;
 
-      const targetBed: Bed | undefined = targetRoom.beds.find((b: Bed) => b.id === bedId);
-      if (!targetBed) return prev;
-
-      // Prevent two students from occupying the same bed or assigning to maintenance beds
-      if (targetBed.status === 'occupied' && targetBed.studentId && targetBed.studentId !== studentId) {
-        console.warn('Cannot assign student: this bed is already occupied by another student.');
-        return prev;
-      }
-      if (targetBed.status === 'maintenance' || targetRoom.status === 'maintenance' || targetRoom.status === 'closed') {
-        console.warn('Cannot assign student: bed or room is under maintenance.');
-        return prev;
-      }
-
-      const oldBedId = targetStudent.bedId;
+      const oldBedId = liveStudent.bedId;
 
       // Update room/bed
       const updatedRooms = prev.rooms.map((r: Room) => {
         let roomChanged = false;
         const beds = r.beds.map((b: Bed) => {
-          // If student had a previous bed elsewhere, release it to available
           if (oldBedId && b.id === oldBedId && b.id !== bedId) {
             roomChanged = true;
             return {
@@ -912,15 +2024,14 @@ export const DormProvider: React.FC<{ children: React.ReactNode }> = ({ children
               assignedAt: undefined,
             };
           }
-          // Mark target bed as occupied
           if (r.id === roomId && b.id === bedId) {
             roomChanged = true;
             return {
               ...b,
               status: 'occupied' as const,
-              studentId: targetStudent.id,
-              studentName: targetStudent.fullName,
-              assignedAt: new Date().toISOString().slice(0, 10),
+              studentId: liveStudent.id,
+              studentName: liveStudent.fullName,
+              assignedAt: todayStr,
             };
           }
           return b;
@@ -928,60 +2039,328 @@ export const DormProvider: React.FC<{ children: React.ReactNode }> = ({ children
         return roomChanged ? { ...r, beds } : r;
       });
 
-      // Calculate authoritative monthly tariff directly from roomTariffs[room.type]
-      const computedMonthlyTariff =
-        prev.settings.roomTariffs?.[targetRoom.type] ??
-        targetRoom.priceMonthly ??
-        INITIAL_SETTINGS.roomTariffs[targetRoom.type];
+      const baseTierTariff =
+        prev.settings.roomTariffs?.[liveRoom.type] ??
+        liveRoom.priceMonthly ??
+        INITIAL_SETTINGS.roomTariffs[liveRoom.type];
+      const overrideRate =
+        initialBilling?.monthlyRateOverride && initialBilling.monthlyRateOverride > 0
+          ? safeAmount(initialBilling.monthlyRateOverride)
+          : undefined;
+      const computedMonthlyTariff = overrideRate ?? baseTierTariff;
 
-      // Update student
+      // Find linked application (by studentId, applicationId, phone, or passport)
+      const livePhoneKey = normalizePhoneKey(liveStudent.phone);
+      const livePassportLower = liveStudent.passportNumber.trim().toLowerCase();
+      const matchedApp = prev.applications.find(
+        (a: Application) =>
+          a.id === liveStudent.applicationId ||
+          a.studentId === liveStudent.id ||
+          (livePhoneKey.length >= 7 && normalizePhoneKey(a.phone) === livePhoneKey) ||
+          (livePassportLower && a.passportNumber.trim().toLowerCase() === livePassportLower)
+      );
+
+      // Migrate any billing ledger & payments recorded under matchedApp.id before student assignment
+      const nextBillingLedgers: Record<string, StudentBillingLedger> = {
+        ...(prev.billingLedgers || {}),
+      };
+      let nextPayments = prev.payments;
+      if (matchedApp && nextBillingLedgers[matchedApp.id] && !nextBillingLedgers[liveStudent.id]) {
+        nextBillingLedgers[liveStudent.id] = {
+          ...nextBillingLedgers[matchedApp.id],
+          studentId: liveStudent.id,
+        };
+        delete nextBillingLedgers[matchedApp.id];
+      }
+      if (matchedApp) {
+        nextPayments = prev.payments.map((p: Payment) =>
+          p.studentId === matchedApp.id
+            ? {
+                ...p,
+                studentId: liveStudent.id,
+                floor: liveRoom.floor,
+                roomNumber: liveRoom.roomNumber,
+                bedLabel,
+              }
+            : p
+        );
+      }
+
+      // Initialize or update 12-month billing ledger if initialBilling provided (or initialize empty ledger)
+      const existingLedger = nextBillingLedgers[liveStudent.id];
+      if (initialBilling) {
+        const billingDateTime = ensureDateTimeValue(initialBilling.paymentDate);
+        const billingDateOnly = extractDatePart(billingDateTime) || todayStr;
+        const billingTime = extractTimePart(billingDateTime);
+        const billingMethod: BillingPaymentMethod =
+          normalizeBillingMethod(initialBilling.paymentMethod) || 'cash';
+        const billingNotes = initialBilling.notes?.trim() || undefined;
+
+        const targetPeriod = initialBilling.initialPeriod || getCurrentBillingPeriod();
+        const rawMonthStatus = initialBilling.monthStatus || 'pending';
+        const monthPaid =
+          rawMonthStatus === 'paid'
+            ? computedMonthlyTariff
+            : rawMonthStatus === 'partial'
+            ? safeAmount(initialBilling.monthAmount)
+            : 0;
+        const resolvedPaidUntil =
+          monthPaid > 0
+            ? isValidIsoDate(initialBilling.paidUntil)
+              ? initialBilling.paidUntil!.trim()
+              : addDaysToDateStr(billingDateTime, 30)
+            : undefined;
+
+        const monthsMap: Record<string, MonthlyBillingEntry> = {};
+        ACADEMIC_BILLING_MONTHS.forEach((m) => {
+          const prior = existingLedger?.months?.[m.period];
+          if (m.period === targetPeriod) {
+            monthsMap[m.period] = {
+              period: m.period,
+              paidAmount: monthPaid,
+              status:
+                monthPaid === 0
+                  ? 'pending'
+                  : computedMonthlyTariff > 0 && monthPaid >= computedMonthlyTariff
+                  ? 'paid'
+                  : 'partial',
+              paymentDate: monthPaid > 0 ? billingDateTime : prior?.paymentDate,
+              paidUntil: monthPaid > 0 ? resolvedPaidUntil : prior?.paidUntil,
+              paymentMethod: monthPaid > 0 ? billingMethod : prior?.paymentMethod,
+              notes: monthPaid > 0 ? billingNotes : prior?.notes,
+              updatedAt: nowIso,
+            };
+          } else {
+            monthsMap[m.period] = prior || {
+              period: m.period,
+              status: 'pending',
+              paidAmount: 0,
+            };
+          }
+        });
+
+        const nextLedgerPaidUntil =
+          resolvedPaidUntil &&
+          (!existingLedger?.paidUntil || resolvedPaidUntil >= existingLedger.paidUntil)
+            ? resolvedPaidUntil
+            : existingLedger?.paidUntil;
+
+        nextBillingLedgers[liveStudent.id] = {
+          studentId: liveStudent.id,
+          ...(overrideRate
+            ? { monthlyRateOverride: overrideRate }
+            : existingLedger?.monthlyRateOverride
+            ? { monthlyRateOverride: existingLedger.monthlyRateOverride }
+            : {}),
+          ...(nextLedgerPaidUntil ? { paidUntil: nextLedgerPaidUntil } : {}),
+          months: monthsMap,
+          updatedAt: nowIso,
+        };
+
+        const syncedEntries: Payment[] = [];
+        if (monthPaid > 0) {
+          syncedEntries.push({
+            id: assignPaymentId,
+            studentId: liveStudent.id,
+            studentName: liveStudent.fullName,
+            floor: liveRoom.floor,
+            roomNumber: liveRoom.roomNumber,
+            bedLabel,
+            amount: monthPaid,
+            paymentDate: billingDateTime,
+            paymentTime: billingTime,
+            date: billingDateOnly,
+            paidUntil: resolvedPaidUntil,
+            type: 'income',
+            periodMonth: targetPeriod,
+            itemRemainingAfter: Math.max(0, computedMonthlyTariff - monthPaid),
+            paymentMethod: billingMethod,
+            recordedBy: currentUserName,
+            status: 'completed',
+            notes: billingNotes,
+          });
+        }
+
+        const periodsToReplace = new Set<string>([targetPeriod]);
+        const keptPayments = nextPayments.filter(
+          (p: Payment) => !(p.studentId === liveStudent.id && periodsToReplace.has(p.periodMonth))
+        );
+        nextPayments = [...syncedEntries, ...keptPayments].sort(comparePaymentsChronoDesc);
+      } else if (!existingLedger) {
+        const emptyMonths: Record<string, MonthlyBillingEntry> = {};
+        ACADEMIC_BILLING_MONTHS.forEach((m) => {
+          emptyMonths[m.period] = {
+            period: m.period,
+            status: 'pending',
+            paidAmount: 0,
+          };
+        });
+        nextBillingLedgers[liveStudent.id] = {
+          studentId: liveStudent.id,
+          months: emptyMonths,
+          updatedAt: nowIso,
+        };
+      }
+
+      // Create contract
+      const newContract: Contract = {
+        id: `cnt-${Date.now()}`,
+        contractNumber: `RC-2026/${liveRoom.roomNumber}-${bedLabel}`,
+        studentId: liveStudent.id,
+        studentName: liveStudent.fullName,
+        passportNumber: liveStudent.passportNumber,
+        roomNumber: liveRoom.roomNumber,
+        bedNumber: liveBed.bedNumber,
+        bedIdentifier: bedLabel,
+        roomType: liveRoom.type,
+        tariffMonthly: computedMonthlyTariff,
+        startDate: todayStr,
+        endDate: '2027-06-30',
+        status: 'active',
+        createdAt: todayStr,
+        pdfGeneratedAt: nowIso.replace('T', ' ').slice(0, 16),
+      };
+
+      // Update student with computed financial snapshot
       const updatedStudents = prev.students.map((s: Student) => {
         if (s.id === studentId) {
-          return {
+          const baseStudent: Student = {
             ...s,
             status: 'active' as const,
+            applicationId: s.applicationId || matchedApp?.id,
             roomId,
             bedId,
-            roomNumber: targetRoom.roomNumber,
-            bedNumber: targetBed.bedNumber,
-            bedIdentifier: targetBed.bedIdentifier || String(targetBed.bedNumber),
-            floor: targetRoom.floor,
-            roomType: targetRoom.type,
+            roomNumber: liveRoom.roomNumber,
+            bedNumber: liveBed.bedNumber,
+            bedIdentifier: bedLabel,
+            floor: liveRoom.floor,
+            roomType: liveRoom.type,
             monthlyTariff: computedMonthlyTariff,
+            tempLogin,
+            tempPassword,
+          };
+          const summary = computeStudentBillingSummary({
+            entityId: baseStudent.id,
+            student: baseStudent,
+            application: matchedApp,
+            contract: newContract,
+            rooms: updatedRooms,
+            settings: prev.settings,
+            payments: nextPayments,
+            ledger: nextBillingLedgers[baseStudent.id],
+          });
+          const computedPaidUntil = summary.paidUntilDate || '';
+          const expiryInfo = computePaymentExpiryInfo(computedPaidUntil);
+          const computedPaymentStatus: 'paid' | 'due_soon' | 'overdue' =
+            expiryInfo.status === 'overdue'
+              ? 'overdue'
+              : expiryInfo.status === 'expiring_soon'
+              ? 'due_soon'
+              : expiryInfo.status === 'active'
+              ? 'paid'
+              : summary.remainingBalance > 0
+              ? 'overdue'
+              : 'paid';
+          return {
+            ...baseStudent,
+            monthlyTariff: summary.monthlyRate,
+            debtAmount: summary.remainingBalance,
+            paymentStatus: computedPaymentStatus,
+            paidUntil: computedPaidUntil,
+            nextPaymentDueDate: computedPaidUntil,
+            nextPaymentDate: computedPaidUntil,
           };
         }
         return s;
       });
 
-      // Create contract if not exists
-      const bedLabel = targetBed.bedIdentifier || String(targetBed.bedNumber);
-      const newContract: Contract = {
-        id: `cnt-${Date.now()}`,
-        contractNumber: `RC-2026/${targetRoom.roomNumber}-${bedLabel}`,
-        studentId: targetStudent.id,
-        studentName: targetStudent.fullName,
-        passportNumber: targetStudent.passportNumber,
-        roomNumber: targetRoom.roomNumber,
-        bedNumber: targetBed.bedNumber,
-        bedIdentifier: bedLabel,
-        roomType: targetRoom.type,
-        tariffMonthly: computedMonthlyTariff,
-        startDate: new Date().toISOString().slice(0, 10),
-        endDate: '2027-06-30',
-        status: 'active',
-        createdAt: new Date().toISOString().slice(0, 10),
-        pdfGeneratedAt: new Date().toISOString().replace('T', ' ').slice(0, 16),
+      // Update linked application status + room/bed + credentials
+      const updatedApplications = prev.applications.map((a: Application) => {
+        if (matchedApp && a.id === matchedApp.id) {
+          return {
+            ...a,
+            status: 'approved' as const,
+            studentId: liveStudent.id,
+            assignedRoomNumber: liveRoom.roomNumber,
+            assignedBedNumber: Number(liveBed.bedNumber) || undefined,
+            assignedBedIdentifier: bedLabel,
+            preferredRoomType: a.preferredRoomType || liveRoom.type,
+            monthlyTariff: computedMonthlyTariff,
+            tempLogin,
+            tempPassword,
+            reviewedBy: a.reviewedBy || currentUserName,
+          };
+        }
+        return a;
+      });
+
+      // Upsert hashed student credentials so temporary password works immediately on login
+      const existingAccounts: StoredUserAccount[] = Array.isArray(prev.userAccounts) ? prev.userAccounts : [];
+      const existingAccountIdx = existingAccounts.findIndex(
+        (acc) =>
+          acc.studentId === liveStudent.id ||
+          (matchedApp && acc.applicationId === matchedApp.id) ||
+          (livePhoneKey.length >= 7 && normalizePhoneKey(acc.phone) === livePhoneKey)
+      );
+
+      const nextAccount: StoredUserAccount = {
+        id: existingAccountIdx >= 0 ? existingAccounts[existingAccountIdx].id : `acct-${Date.now()}`,
+        identifier: livePhoneKey || tempLogin.toLowerCase(),
+        login: existingAccountIdx >= 0 ? existingAccounts[existingAccountIdx].login : undefined,
+        phone: tempLogin,
+        role: 'student',
+        studentId: liveStudent.id,
+        applicationId: liveStudent.applicationId || matchedApp?.id,
+        passwordHash,
+        passwordSalt: salt,
+        updatedAt: nowIso,
+      };
+
+      const nextUserAccounts =
+        existingAccountIdx >= 0
+          ? existingAccounts.map((acc, idx) => (idx === existingAccountIdx ? nextAccount : acc))
+          : [nextAccount, ...existingAccounts];
+
+      const studentNotif: NotificationItem = {
+        id: `notif-assign-${Date.now()}`,
+        type: 'application',
+        title: 'Xona va o‘rin biriktirildi',
+        message: `${liveStudent.fullName}: ${liveRoom.roomNumber}-xona, ${bedLabel}-o‘rin tasdiqlandi.`,
+        date: nowIso.replace('T', ' ').slice(0, 16),
+        isRead: false,
+        recipientRole: 'student',
+        studentId: liveStudent.id,
       };
 
       return {
         ...prev,
         rooms: updatedRooms,
         students: updatedStudents,
+        applications: updatedApplications,
         contracts: [newContract, ...prev.contracts],
+        payments: nextPayments,
+        billingLedgers: nextBillingLedgers,
+        userAccounts: nextUserAccounts,
+        notifications: [studentNotif, ...prev.notifications],
       };
     });
 
-    addAudit('Talaba o\'ringa biriktirildi', 'Bed', bedId, undefined, `Student: ${studentId}`);
+    await syncAssignBedFlow({
+      student: studentForSync,
+      newBedId: bedId,
+      oldBedId: oldBedIdForSync,
+      applicationId: matchedAppForSync?.id || targetStudent.applicationId,
+      initialPayments: initialPaymentsForSync,
+      replacedPeriod: replacedPeriodForSync,
+    });
+
+    addAudit('Talaba o\'ringa biriktirildi', 'Bed', bedId, undefined, `Student: ${studentId}, Room: ${targetRoom.roomNumber}`);
+    return {
+      tempLogin,
+      tempPassword,
+      roomNumber: targetRoom.roomNumber,
+      bedLabel,
+    };
   };
 
   const transferBed = (studentId: string, newRoomId: string, newBedId: string) => {
@@ -1030,24 +2409,6 @@ export const DormProvider: React.FC<{ children: React.ReactNode }> = ({ children
         targetRoom.priceMonthly ??
         INITIAL_SETTINGS.roomTariffs[targetRoom.type];
 
-      // Update student
-      const updatedStudents = prev.students.map((s: Student) => {
-        if (s.id === studentId) {
-          return {
-            ...s,
-            roomId: newRoomId,
-            bedId: newBedId,
-            roomNumber: targetRoom.roomNumber,
-            bedNumber: targetBed.bedNumber,
-            bedIdentifier: targetBed.bedIdentifier || String(targetBed.bedNumber),
-            floor: targetRoom.floor,
-            roomType: targetRoom.type,
-            monthlyTariff: computedMonthlyTariff,
-          };
-        }
-        return s;
-      });
-
       // Update student's active contract with new room & bed
       const bedLabel = targetBed.bedIdentifier || String(targetBed.bedNumber);
       const updatedContracts = prev.contracts.map((cnt: Contract) => {
@@ -1065,13 +2426,100 @@ export const DormProvider: React.FC<{ children: React.ReactNode }> = ({ children
         return cnt;
       });
 
+      const updatedApplications = prev.applications.map((a: Application) => {
+        if (a.studentId === studentId || (std.applicationId && a.id === std.applicationId)) {
+          return {
+            ...a,
+            assignedRoomNumber: targetRoom.roomNumber,
+            assignedBedNumber: Number(targetBed.bedNumber) || undefined,
+            assignedBedIdentifier: bedLabel,
+            monthlyTariff: computedMonthlyTariff,
+          };
+        }
+        return a;
+      });
+
+      // Update student
+      const updatedStudents = prev.students.map((s: Student) => {
+        if (s.id === studentId) {
+          const moved: Student = {
+            ...s,
+            roomId: newRoomId,
+            bedId: newBedId,
+            roomNumber: targetRoom.roomNumber,
+            bedNumber: targetBed.bedNumber,
+            bedIdentifier: bedLabel,
+            floor: targetRoom.floor,
+            roomType: targetRoom.type,
+            monthlyTariff: computedMonthlyTariff,
+          };
+          const summary = computeStudentBillingSummary({
+            entityId: moved.id,
+            student: moved,
+            application: findLinkedApplication(moved, updatedApplications),
+            contract: updatedContracts.find((c: Contract) => c.studentId === moved.id && c.status === 'active'),
+            rooms: updatedRooms,
+            settings: prev.settings,
+            payments: prev.payments,
+            ledger: (prev.billingLedgers || {})[moved.id],
+          });
+          return {
+            ...moved,
+            monthlyTariff: summary.monthlyRate,
+            debtAmount: summary.remainingBalance,
+            paymentStatus: (summary.remainingBalance > 0 ? 'overdue' : 'paid') as 'overdue' | 'paid',
+          };
+        }
+        return s;
+      });
+
       return {
         ...prev,
         rooms: updatedRooms,
         students: updatedStudents,
         contracts: updatedContracts,
+        applications: updatedApplications,
       };
     });
+
+    const targetRoomForSync = rooms.find((r: Room) => r.id === newRoomId);
+    const targetBedForSync = targetRoomForSync?.beds.find((b: Bed) => b.id === newBedId);
+    const canSyncTransfer = Boolean(
+      std &&
+        targetRoomForSync &&
+        targetBedForSync &&
+        !(targetBedForSync.status === 'occupied' && targetBedForSync.studentId && targetBedForSync.studentId !== studentId) &&
+        targetBedForSync.status !== 'maintenance' &&
+        targetRoomForSync.status !== 'maintenance' &&
+        targetRoomForSync.status !== 'closed'
+    );
+    if (canSyncTransfer && std && targetRoomForSync && targetBedForSync) {
+      const roomTypeForSync = targetRoomForSync.type as RoomType;
+      const bedLabelForSync = targetBedForSync.bedIdentifier || String(targetBedForSync.bedNumber);
+      const tariffForSync =
+        settings.roomTariffs?.[roomTypeForSync] ??
+        targetRoomForSync.priceMonthly ??
+        INITIAL_SETTINGS.roomTariffs[roomTypeForSync];
+      const linkedAppForSync = applications.find(
+        (a: Application) => a.studentId === studentId || (std.applicationId && a.id === std.applicationId)
+      );
+      void syncAssignBedFlow({
+        student: {
+          ...std,
+          roomId: newRoomId,
+          bedId: newBedId,
+          roomNumber: targetRoomForSync.roomNumber,
+          bedNumber: targetBedForSync.bedNumber,
+          bedIdentifier: bedLabelForSync,
+          floor: targetRoomForSync.floor,
+          roomType: targetRoomForSync.type,
+          monthlyTariff: tariffForSync,
+        },
+        newBedId,
+        oldBedId: std.bedId,
+        applicationId: linkedAppForSync?.id || std.applicationId,
+      });
+    }
 
     addAudit('Talaba ko\'chirildi (Transfer)', 'Student', studentId, std?.roomNumber, `New Room`);
   };
@@ -1082,22 +2530,53 @@ export const DormProvider: React.FC<{ children: React.ReactNode }> = ({ children
       return;
     }
 
+    let releasedStudentIdForSync: string | undefined;
+    rooms.forEach((r: Room) => {
+      r.beds.forEach((b: Bed) => {
+        if (b.id === bedId) releasedStudentIdForSync = b.studentId;
+      });
+    });
+    const affectedStudentIdsForSync: string[] = [];
+    const affectedAppIdsForSync: string[] = [];
+    students.forEach((s: Student) => {
+      if (s.bedId === bedId || (releasedStudentIdForSync && s.id === releasedStudentIdForSync)) {
+        affectedStudentIdsForSync.push(s.id);
+        if (s.applicationId) affectedAppIdsForSync.push(s.applicationId);
+      }
+    });
+    applications.forEach((a: Application) => {
+      if (a.studentId && affectedStudentIdsForSync.includes(a.studentId) && !affectedAppIdsForSync.includes(a.id)) {
+        affectedAppIdsForSync.push(a.id);
+      }
+    });
+
     setState((prev: typeof state) => {
       let releasedStudentId: string | undefined;
 
       const updatedRooms = prev.rooms.map((r: Room) => {
-        const beds = r.beds.map((b) => {
+        const beds = r.beds.map((b: Bed) => {
           if (b.id === bedId) {
             releasedStudentId = b.studentId;
-            return { ...b, status: 'available' as const, studentId: undefined, studentName: undefined };
+            return {
+              ...b,
+              status: 'available' as const,
+              studentId: undefined,
+              studentName: undefined,
+              assignedAt: undefined,
+            };
           }
           return b;
         });
         return { ...r, beds };
       });
 
+      const affectedStudentIds = new Set<string>();
+      const affectedAppIds = new Set<string>();
+
       const updatedStudents = prev.students.map((s: Student) => {
         if (s.bedId === bedId || (releasedStudentId && s.id === releasedStudentId)) {
+          affectedStudentIds.add(s.id);
+          if (s.applicationId) affectedAppIds.add(s.applicationId);
           return {
             ...s,
             roomId: undefined,
@@ -1105,19 +2584,103 @@ export const DormProvider: React.FC<{ children: React.ReactNode }> = ({ children
             roomNumber: undefined,
             bedNumber: undefined,
             bedIdentifier: undefined,
+            floor: undefined,
           };
         }
         return s;
       });
 
+      const updatedApplications = prev.applications.map((a: Application) => {
+        if (
+          (a.studentId && affectedStudentIds.has(a.studentId)) ||
+          affectedAppIds.has(a.id)
+        ) {
+          return {
+            ...a,
+            assignedRoomNumber: undefined,
+            assignedBedNumber: undefined,
+            assignedBedIdentifier: undefined,
+          };
+        }
+        return a;
+      });
+
+      const updatedContracts = prev.contracts.map((c: Contract) =>
+        affectedStudentIds.has(c.studentId) && c.status === 'active'
+          ? { ...c, status: 'terminated' as const }
+          : c
+      );
+
       return {
         ...prev,
         rooms: updatedRooms,
         students: updatedStudents,
+        applications: updatedApplications,
+        contracts: updatedContracts,
       };
     });
 
+    void syncReleaseBedCascade({
+      bedId,
+      affectedStudentIds: affectedStudentIdsForSync,
+      affectedAppIds: affectedAppIdsForSync,
+    });
+
     addAudit('O\'rin bo\'shatildi', 'Bed', bedId);
+  };
+
+  const resetAllBedsToAvailable = () => {
+    if (role !== 'owner' && role !== 'manager') {
+      console.warn('Only Owner or Manager can reset all beds.');
+      return;
+    }
+
+    setState((prev: typeof state) => {
+      const updatedRooms = prev.rooms.map((r: Room) => ({
+        ...r,
+        status: 'available' as const,
+        isClosedForMaintenance: false,
+        beds: r.beds.map((b: Bed) => ({
+          ...b,
+          status: 'available' as const,
+          studentId: undefined,
+          studentName: undefined,
+          assignedAt: undefined,
+        })),
+      }));
+
+      const updatedStudents = prev.students.map((s: Student) => ({
+        ...s,
+        roomId: undefined,
+        bedId: undefined,
+        roomNumber: undefined,
+        bedNumber: undefined,
+        bedIdentifier: undefined,
+        floor: undefined,
+      }));
+
+      const updatedApplications = prev.applications.map((a: Application) => ({
+        ...a,
+        assignedRoomNumber: undefined,
+        assignedBedNumber: undefined,
+        assignedBedIdentifier: undefined,
+      }));
+
+      const updatedContracts = prev.contracts.map((c: Contract) =>
+        c.status === 'active' ? { ...c, status: 'terminated' as const } : c
+      );
+
+      return {
+        ...prev,
+        rooms: updatedRooms,
+        students: updatedStudents,
+        applications: updatedApplications,
+        contracts: updatedContracts,
+      };
+    });
+
+    void syncResetAllBeds();
+    addAudit('Barcha o‘rinlar bo‘sh holatga qaytarildi', 'Room', 'all');
   };
 
   // RBAC Permission check: Only 'owner' and 'manager' can configure rooms & beds
@@ -1204,6 +2767,7 @@ export const DormProvider: React.FC<{ children: React.ReactNode }> = ({ children
       rooms: [...prev.rooms, newRoom],
     }));
 
+    void syncUpsertRoomAndBeds(newRoom);
     addAudit(
       `Yangi xona qo'shildi (${exactRoomNumber}, ${roomType}, ${capacity} o'rin)`,
       'Room',
@@ -1348,6 +2912,21 @@ export const DormProvider: React.FC<{ children: React.ReactNode }> = ({ children
       };
     });
 
+    const keptBedIds = new Set(updatedBeds.map((b) => b.id));
+    const removedBedIdsForSync = existingRoom.beds
+      .filter((b: Bed) => !keptBedIds.has(b.id))
+      .map((b: Bed) => b.id);
+    const affectedStudentsForSync = students
+      .filter((s: Student) => s.roomId === roomId)
+      .map((s: Student) => ({
+        ...s,
+        roomNumber: targetRoomNumber,
+        floor: targetFloor,
+        roomType: newRoomType,
+        monthlyTariff: newPrice,
+      }));
+    void syncUpsertRoomAndBeds(updatedRoom, removedBedIdsForSync, affectedStudentsForSync);
+
     addAudit(
       `Xona konfiguratsiyasi tahrirlandi (${targetRoomNumber})`,
       'Room',
@@ -1391,6 +2970,7 @@ export const DormProvider: React.FC<{ children: React.ReactNode }> = ({ children
       rooms: prev.rooms.filter((r: Room) => r.id !== roomId),
     }));
 
+    void syncDeleteRoomAndBeds(roomId);
     addAudit(`Xona o'chirildi (${room.roomNumber})`, 'Room', roomId, room.roomNumber, undefined);
 
     return { success: true };
@@ -1464,6 +3044,7 @@ export const DormProvider: React.FC<{ children: React.ReactNode }> = ({ children
       };
     });
 
+    void syncUpdateSingleBed(bedId, updates);
     addAudit(`O'rin ma'lumoti yangilandi`, 'Bed', bedId, bed.bedIdentifier, updates.bedIdentifier);
 
     return { success: true };
@@ -1523,9 +3104,11 @@ export const DormProvider: React.FC<{ children: React.ReactNode }> = ({ children
     studentId: string;
     amount: number;
     paymentDate: string;
+    paidUntil?: string;
     periodMonth: string;
-    paymentMethod: 'cash' | 'card' | 'bank_transfer';
+    paymentMethod: BillingPaymentMethod;
     notes?: string;
+    monthlyRateOverride?: number;
   }): Payment => {
     if (role === 'security') {
       console.warn('Security role is not permitted to record payments.');
@@ -1533,60 +3116,237 @@ export const DormProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
 
     const std = students.find((s: Student) => s.id === paymentData.studentId);
-    const paymentDateStr = paymentData.paymentDate || new Date().toISOString().split('T')[0];
-    const newPayment: Payment = {
-      id: `PAY-${Date.now()}`,
+    const appEntity = !std
+      ? applications.find((a: Application) => a.id === paymentData.studentId)
+      : undefined;
+    const paymentDateTime = ensureDateTimeValue(paymentData.paymentDate);
+    const paymentTime = extractTimePart(paymentDateTime);
+    const paymentDateOnly = extractDatePart(paymentDateTime);
+    const cleanAmount = safeAmount(paymentData.amount);
+    const period = paymentData.periodMonth || getCurrentBillingPeriod();
+    const normMethod: BillingPaymentMethod =
+      normalizeBillingMethod(paymentData.paymentMethod) || 'cash';
+    const resolvedPaidUntil = isValidIsoDate(paymentData.paidUntil)
+      ? paymentData.paidUntil!.trim()
+      : addDaysToDateStr(paymentDateTime, 30);
+
+    const roomNum = std?.roomNumber || appEntity?.assignedRoomNumber || '---';
+    const roomObj = rooms.find((r: Room) => r.id === std?.roomId || r.roomNumber === roomNum);
+    const floorNum = std?.floor || roomObj?.floor;
+    const bedLabel =
+      std?.bedIdentifier ||
+      (std?.bedNumber ? String(std.bedNumber) : undefined) ||
+      appEntity?.assignedBedIdentifier ||
+      (appEntity?.assignedBedNumber ? String(appEntity.assignedBedNumber) : undefined);
+
+    const newPaymentId = `PAY-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
+
+    const baseReturnedPayment: Payment = {
+      id: newPaymentId,
       studentId: paymentData.studentId,
-      studentName: std ? std.fullName : 'Noma\'lum',
-      roomNumber: std?.roomNumber || '---',
-      amount: paymentData.amount,
-      paymentDate: paymentDateStr,
-      date: paymentDateStr,
+      studentName: std ? std.fullName : appEntity ? appEntity.fullName : 'Noma\'lum',
+      floor: floorNum,
+      roomNumber: roomNum,
+      bedLabel,
+      amount: cleanAmount,
+      paymentDate: paymentDateTime,
+      paymentTime,
+      date: paymentDateOnly,
+      paidUntil: resolvedPaidUntil,
       type: 'income',
-      periodMonth: paymentData.periodMonth || paymentDateStr.slice(0, 7),
-      paymentMethod: paymentData.paymentMethod,
+      periodMonth: period,
+      paymentMethod: normMethod,
       recordedBy: currentUserName,
       status: 'completed',
-      notes: paymentData.notes,
+      notes: paymentData.notes?.trim() || undefined,
     };
 
-    // Calculate extended paid-until date and next payment date (+1 month)
-    const baseDate = std?.nextPaymentDueDate || std?.nextPaymentDate || std?.paidUntil
-      ? new Date(std.nextPaymentDueDate || std.nextPaymentDate || std.paidUntil)
-      : new Date();
-    const effectiveDate = !isNaN(baseDate.getTime()) && baseDate > new Date() ? baseDate : new Date();
-    const nextDate = new Date(effectiveDate);
-    nextDate.setMonth(nextDate.getMonth() + 1);
-    const nextDateStr = nextDate.toISOString().split('T')[0];
-
     setState((prev: typeof state) => {
+      const existingLedgers: Record<string, StudentBillingLedger> = {
+        ...(prev.billingLedgers || {}),
+      };
+      const targetStudent = prev.students.find((s: Student) => s.id === paymentData.studentId);
+      const linkedApp = targetStudent
+        ? findLinkedApplication(targetStudent, prev.applications)
+        : prev.applications.find((a: Application) => a.id === paymentData.studentId);
+      const activeCnt = targetStudent
+        ? prev.contracts.find((c: Contract) => c.studentId === paymentData.studentId && c.status === 'active')
+        : undefined;
+
+      const existingEntityLedger = existingLedgers[paymentData.studentId];
+      const nextOverride =
+        paymentData.monthlyRateOverride !== undefined
+          ? paymentData.monthlyRateOverride > 0
+            ? safeAmount(paymentData.monthlyRateOverride)
+            : undefined
+          : existingEntityLedger?.monthlyRateOverride;
+
+      const ledgerForCalc: StudentBillingLedger | undefined = existingEntityLedger
+        ? {
+            ...existingEntityLedger,
+            ...(nextOverride ? { monthlyRateOverride: nextOverride } : {}),
+          }
+        : nextOverride
+        ? {
+            studentId: paymentData.studentId,
+            monthlyRateOverride: nextOverride,
+            months: {},
+            updatedAt: new Date().toISOString(),
+          }
+        : undefined;
+
+      const priorSummary = computeStudentBillingSummary({
+        entityId: paymentData.studentId,
+        student: targetStudent,
+        application: linkedApp,
+        contract: activeCnt,
+        rooms: prev.rooms,
+        settings: prev.settings,
+        payments: prev.payments,
+        ledger: ledgerForCalc,
+      });
+
+      const baseMonths: Record<string, MonthlyBillingEntry> = {};
+      priorSummary.months.forEach((m) => {
+        baseMonths[m.period] = {
+          period: m.period,
+          status: m.status,
+          paidAmount: m.paidAmount,
+          paymentDate: m.paymentDate,
+          paidUntil: m.paidUntil,
+          paymentMethod: m.paymentMethod,
+          notes: m.notes,
+        };
+      });
+
+      const currentMonthRow = baseMonths[period] || {
+        period,
+        status: 'pending' as const,
+        paidAmount: 0,
+      };
+      const nextMonthPaid = safeAmount(currentMonthRow.paidAmount) + cleanAmount;
+      const rate = priorSummary.monthlyRate;
+      const itemRemainingAfter = Math.max(0, rate - nextMonthPaid);
+      baseMonths[period] = {
+        period,
+        paidAmount: nextMonthPaid,
+        status: rate > 0 && nextMonthPaid >= rate ? 'paid' : nextMonthPaid > 0 ? 'partial' : 'pending',
+        paymentDate: paymentDateTime,
+        paidUntil: resolvedPaidUntil,
+        paymentMethod: normMethod,
+        notes: paymentData.notes?.trim() || currentMonthRow.notes,
+      };
+
+      const persistedPayment: Payment = {
+        ...baseReturnedPayment,
+        floor: targetStudent?.floor ?? priorSummary.room?.floor ?? baseReturnedPayment.floor,
+        roomNumber:
+          targetStudent?.roomNumber ||
+          priorSummary.room?.roomNumber ||
+          linkedApp?.assignedRoomNumber ||
+          baseReturnedPayment.roomNumber,
+        bedLabel:
+          targetStudent?.bedIdentifier ||
+          (targetStudent?.bedNumber ? String(targetStudent.bedNumber) : undefined) ||
+          baseReturnedPayment.bedLabel,
+        itemRemainingAfter,
+      };
+
+      const nextPayments = [persistedPayment, ...prev.payments].sort(comparePaymentsChronoDesc);
+
+      const nextLedgerPaidUntil =
+        !existingEntityLedger?.paidUntil || resolvedPaidUntil >= existingEntityLedger.paidUntil
+          ? resolvedPaidUntil
+          : existingEntityLedger.paidUntil;
+
+      const nextLedger: StudentBillingLedger = {
+        studentId: paymentData.studentId,
+        ...(nextOverride ? { monthlyRateOverride: nextOverride } : {}),
+        ...(nextLedgerPaidUntil ? { paidUntil: nextLedgerPaidUntil } : {}),
+        months: baseMonths,
+        updatedAt: new Date().toISOString(),
+      };
+      const nextLedgers = {
+        ...existingLedgers,
+        [paymentData.studentId]: nextLedger,
+      };
+
       const updatedStudents = prev.students.map((s: Student) => {
         if (s.id === paymentData.studentId) {
-          const newDebt = Math.max(0, s.debtAmount - paymentData.amount);
+          const summary = computeStudentBillingSummary({
+            entityId: s.id,
+            student: s,
+            application: linkedApp,
+            contract: activeCnt,
+            rooms: prev.rooms,
+            settings: prev.settings,
+            payments: nextPayments,
+            ledger: nextLedger,
+          });
+          const computedPaidUntil = summary.paidUntilDate || '';
+          const expiryInfo = computePaymentExpiryInfo(computedPaidUntil);
+          const computedPaymentStatus: 'paid' | 'due_soon' | 'overdue' =
+            expiryInfo.status === 'overdue'
+              ? 'overdue'
+              : expiryInfo.status === 'expiring_soon'
+              ? 'due_soon'
+              : expiryInfo.status === 'active'
+              ? 'paid'
+              : summary.remainingBalance > 0
+              ? 'overdue'
+              : 'paid';
           return {
             ...s,
-            lastPaymentDate: paymentDateStr,
-            nextPaymentDate: nextDateStr, // ✅ Yangi sana
-            nextPaymentDueDate: nextDateStr,
-            paidUntil: nextDateStr,
-            paymentStatus: 'paid' as const, // ✅ Status yangilandi
-            debtAmount: newDebt,
+            lastPaymentDate: paymentDateTime,
+            nextPaymentDate: computedPaidUntil,
+            nextPaymentDueDate: computedPaidUntil,
+            paidUntil: computedPaidUntil,
+            paymentStatus: computedPaymentStatus,
+            debtAmount: summary.remainingBalance,
+            monthlyTariff: summary.monthlyRate,
           };
         }
         return s;
       });
 
+      const updatedApplications = prev.applications.map((a: Application) => {
+        if (a.id === paymentData.studentId || (targetStudent?.applicationId && a.id === targetStudent.applicationId)) {
+          return {
+            ...a,
+            monthlyTariff: priorSummary.monthlyRate,
+          };
+        }
+        return a;
+      });
+
+      const updatedContracts = prev.contracts.map((c: Contract) => {
+        if (
+          c.status === 'active' &&
+          (c.studentId === paymentData.studentId ||
+            (linkedApp?.studentId && c.studentId === linkedApp.studentId))
+        ) {
+          return {
+            ...c,
+            tariffMonthly: priorSummary.monthlyRate,
+          };
+        }
+        return c;
+      });
+
       return {
         ...prev,
-        payments: [newPayment, ...prev.payments],
+        payments: nextPayments,
         students: updatedStudents,
+        applications: updatedApplications,
+        contracts: updatedContracts,
+        billingLedgers: nextLedgers,
         notifications: [
           {
             id: `notif-${Date.now()}`,
             type: 'payment',
             title: 'To\'lov muvaffaqiyatli qabul qilindi',
-            message: `${std?.fullName || 'Talaba'} tomonidan ${paymentData.amount.toLocaleString()} UZS to'landi.`,
-            date: new Date().toISOString().replace('T', ' ').slice(0, 16),
+            message: `${std?.fullName || appEntity?.fullName || 'Rezident'} tomonidan ${cleanAmount.toLocaleString()} UZS to'landi (${formatMethodLabel(normMethod, 'uz')}).`,
+            date: paymentDateTime.replace('T', ' '),
             isRead: false,
             recipientRole: 'all',
           },
@@ -1595,76 +3355,557 @@ export const DormProvider: React.FC<{ children: React.ReactNode }> = ({ children
       };
     });
 
-    addAudit('To\'lov kiritildi', 'Payment', newPayment.id, undefined, `${paymentData.amount} UZS`);
-    return newPayment;
+    const existingPaidUntilList = [
+      std?.paidUntil,
+      billingLedgers[paymentData.studentId]?.paidUntil,
+      resolvedPaidUntil,
+    ]
+      .filter((d): d is string => Boolean(d && isValidIsoDate(d)))
+      .sort();
+    const syncedResidentPaidUntil =
+      existingPaidUntilList.length > 0
+        ? existingPaidUntilList[existingPaidUntilList.length - 1]
+        : resolvedPaidUntil;
+
+    void syncRecordPaymentFlow({
+      payment: baseReturnedPayment,
+      residentId: paymentData.studentId,
+      paidUntil: syncedResidentPaidUntil,
+      monthlyRate:
+        paymentData.monthlyRateOverride && paymentData.monthlyRateOverride > 0
+          ? safeAmount(paymentData.monthlyRateOverride)
+          : undefined,
+      hasResidentRecord: Boolean(std),
+    });
+
+    addAudit('To\'lov kiritildi', 'Payment', newPaymentId, undefined, `${cleanAmount} UZS`);
+    return baseReturnedPayment;
   };
 
   // Dedicated handleAcceptPayment handler
   const handleAcceptPayment = (studentId: string, amount: number): Payment => {
-    const std = students.find((s: Student) => s.id === studentId);
-    const todayStr = new Date().toISOString().split('T')[0];
-
-    // 1. Yangi to'lov tranzaksiyasini qo'shish
-    const newPayment: Payment = {
-      id: `PAY-${Date.now()}`,
+    const nowDateTime = getCurrentLocalDateTime();
+    const targetStudent = students.find((s: Student) => s.id === studentId);
+    const linkedApp = targetStudent
+      ? findLinkedApplication(targetStudent, applications)
+      : applications.find((a: Application) => a.id === studentId);
+    const activeCnt = targetStudent
+      ? contracts.find((c: Contract) => c.studentId === studentId && c.status === 'active')
+      : undefined;
+    const summary = computeStudentBillingSummary({
+      entityId: studentId,
+      student: targetStudent,
+      application: linkedApp,
+      contract: activeCnt,
+      rooms,
+      settings,
+      payments,
+      ledger: billingLedgers[studentId],
+    });
+    const targetPeriod = summary.nextDuePeriod || getCurrentBillingPeriod();
+    return recordPayment({
       studentId,
-      studentName: std ? std.fullName : 'Noma\'lum',
-      roomNumber: std?.roomNumber || '---',
       amount,
-      date: todayStr,
-      paymentDate: todayStr,
-      periodMonth: todayStr.slice(0, 7),
+      paymentDate: nowDateTime,
+      paidUntil: addDaysToDateStr(nowDateTime, 30),
+      periodMonth: targetPeriod,
       paymentMethod: 'cash',
-      recordedBy: currentUserName,
-      type: 'income',
-      status: 'completed',
-    };
+    });
+  };
 
-    // 2. Talabaning keyingi to'lov sanasini (masalan, 1 oyga) surish
-    const currentDate = new Date();
-    // Keyingi to'lov sanasini 1 oy keyinga o'tkazamiz
-    currentDate.setMonth(currentDate.getMonth() + 1);
-    const nextDateStr = currentDate.toISOString().split('T')[0];
+  // Authoritative Billing Ledger Editor Save (12-Month Academic Schedule + Paid-Through Date + Optional Manual Rate Override)
+  const updateStudentBillingLedger = (
+    entityId: string,
+    updates: {
+      monthlyRateOverride?: number;
+      paidUntil?: string;
+      months: Record<string, MonthlyBillingEntry>;
+    }
+  ) => {
+    if (role === 'security') {
+      console.warn('Security role is not permitted to update billing ledgers.');
+      return;
+    }
+
+    const nowIso = new Date().toISOString();
+    const nowDateTime = getCurrentLocalDateTime();
 
     setState((prev: typeof state) => {
-      const updatedStudents = prev.students.map((student: Student) => {
-        if (student.id === studentId) {
-          const newDebt = Math.max(0, student.debtAmount - amount);
-          return {
-            ...student,
-            lastPaymentDate: todayStr,
-            nextPaymentDate: nextDateStr, // ✅ Yangi sana
-            nextPaymentDueDate: nextDateStr,
-            paidUntil: nextDateStr,
-            paymentStatus: 'paid' as const, // ✅ Status yangilandi
-            debtAmount: newDebt,
-          };
-        }
-        return student;
+      const targetStudent: Student | undefined = prev.students.find((s: Student) => s.id === entityId);
+      const targetApp: Application | undefined = targetStudent
+        ? findLinkedApplication(targetStudent, prev.applications)
+        : prev.applications.find((a: Application) => a.id === entityId);
+      const activeCnt: Contract | undefined = targetStudent
+        ? prev.contracts.find((c: Contract) => c.studentId === targetStudent.id && c.status === 'active')
+        : undefined;
+
+      const displayName = targetStudent?.fullName || targetApp?.fullName || 'Rezident';
+      const displayRoom = targetStudent?.roomNumber || targetApp?.assignedRoomNumber || '---';
+      const roomObj = prev.rooms.find(
+        (r: Room) => r.id === targetStudent?.roomId || r.roomNumber === displayRoom
+      );
+      const displayFloor = targetStudent?.floor ?? roomObj?.floor;
+      const displayBedLabel =
+        targetStudent?.bedIdentifier ||
+        (targetStudent?.bedNumber ? String(targetStudent.bedNumber) : undefined) ||
+        targetApp?.assignedBedIdentifier ||
+        (targetApp?.assignedBedNumber ? String(targetApp.assignedBedNumber) : undefined);
+
+      const sanitizedOverride =
+        updates.monthlyRateOverride !== undefined &&
+        Number.isFinite(updates.monthlyRateOverride) &&
+        updates.monthlyRateOverride > 0
+          ? safeAmount(updates.monthlyRateOverride)
+          : undefined;
+
+      const sanitizedMonths: Record<string, MonthlyBillingEntry> = {};
+      ACADEMIC_BILLING_MONTHS.forEach((m) => {
+        const raw = updates.months[m.period];
+        const status = raw?.status || 'pending';
+        const paidAmount = status === 'pending' ? 0 : safeAmount(raw?.paidAmount);
+        const pDateTime = status === 'pending' ? undefined : ensureDateTimeValue(raw?.paymentDate);
+        const pUntil =
+          status === 'pending'
+            ? undefined
+            : isValidIsoDate(raw?.paidUntil)
+            ? raw!.paidUntil!.trim()
+            : pDateTime
+            ? addDaysToDateStr(pDateTime, 30)
+            : undefined;
+        sanitizedMonths[m.period] = {
+          period: m.period,
+          status,
+          ...(raw?.scheduledAmount && raw.scheduledAmount > 0
+            ? { scheduledAmount: safeAmount(raw.scheduledAmount) }
+            : {}),
+          paidAmount,
+          paymentDate: pDateTime,
+          paidUntil: pUntil,
+          paymentMethod: status === 'pending' ? undefined : (normalizeBillingMethod(raw?.paymentMethod) || 'cash'),
+          notes: raw?.notes?.trim() || undefined,
+        };
       });
 
-      // 3. State/Context'ni yangilash
+      const explicitLedgerPaidUntil = isValidIsoDate(updates.paidUntil)
+        ? updates.paidUntil!.trim()
+        : undefined;
+
+      const nextLedger: StudentBillingLedger = {
+        studentId: entityId,
+        ...(sanitizedOverride ? { monthlyRateOverride: sanitizedOverride } : {}),
+        ...(explicitLedgerPaidUntil ? { paidUntil: explicitLedgerPaidUntil } : {}),
+        months: sanitizedMonths,
+        updatedAt: nowIso,
+      };
+
+      const nextLedgers: Record<string, StudentBillingLedger> = {
+        ...(prev.billingLedgers || {}),
+        [entityId]: nextLedger,
+      };
+
+      const prelimSummary = computeStudentBillingSummary({
+        entityId,
+        student: targetStudent,
+        application: targetApp,
+        contract: activeCnt,
+        rooms: prev.rooms,
+        settings: prev.settings,
+        payments: prev.payments,
+        ledger: nextLedger,
+      });
+      const effectiveRate = prelimSummary.monthlyRate;
+
+      const managedPeriods = new Set<string>(ACADEMIC_BILLING_MONTHS.map((m) => m.period));
+      const preservedPayments = prev.payments.filter(
+        (p: Payment) => !(p.studentId === entityId && managedPeriods.has(p.periodMonth))
+      );
+
+      const syncedPayments: Payment[] = [];
+      let txCounter = 0;
+
+      const reconcilePeriodTransactions = (params: {
+        period: string;
+        targetPaid: number;
+        targetExpected: number;
+        status: string;
+        paymentDate?: string;
+        paidUntil?: string;
+        paymentMethod?: BillingPaymentMethod;
+        notes?: string;
+      }) => {
+        const existingPeriodRows = prev.payments.filter(
+          (p: Payment) =>
+            p.studentId === entityId &&
+            p.periodMonth === params.period &&
+            p.status === 'completed'
+        );
+        const existingSum = existingPeriodRows.reduce((s: number, p: Payment) => s + safeAmount(p.amount), 0);
+
+        if (params.status === 'pending' || params.targetPaid <= 0) {
+          return;
+        }
+
+        const itemRemAfter = Math.max(0, params.targetExpected - params.targetPaid);
+        const pDateTime = ensureDateTimeValue(params.paymentDate || nowDateTime);
+        const pTime = extractTimePart(pDateTime);
+        const pDateOnly = extractDatePart(pDateTime);
+        const pUntil = isValidIsoDate(params.paidUntil)
+          ? params.paidUntil!.trim()
+          : addDaysToDateStr(pDateTime, 30);
+
+        if (existingPeriodRows.length > 0 && existingSum === params.targetPaid) {
+          existingPeriodRows.forEach((p: Payment) => {
+            syncedPayments.push({
+              ...p,
+              floor: p.floor ?? displayFloor,
+              roomNumber: p.roomNumber || displayRoom,
+              bedLabel: p.bedLabel ?? displayBedLabel,
+              paidUntil: isValidIsoDate(params.paidUntil) ? params.paidUntil!.trim() : p.paidUntil || pUntil,
+            });
+          });
+          return;
+        }
+
+        if (existingPeriodRows.length > 0 && params.targetPaid > existingSum) {
+          existingPeriodRows.forEach((p: Payment) => {
+            syncedPayments.push({
+              ...p,
+              floor: p.floor ?? displayFloor,
+              roomNumber: p.roomNumber || displayRoom,
+              bedLabel: p.bedLabel ?? displayBedLabel,
+            });
+          });
+          const delta = params.targetPaid - existingSum;
+          txCounter += 1;
+          syncedPayments.push({
+            id: `PAY-${Date.now() + txCounter}-${params.period.slice(-2).toUpperCase()}`,
+            studentId: entityId,
+            studentName: displayName,
+            floor: displayFloor,
+            roomNumber: displayRoom,
+            bedLabel: displayBedLabel,
+            amount: delta,
+            paymentDate: pDateTime,
+            paymentTime: pTime,
+            date: pDateOnly,
+            paidUntil: pUntil,
+            type: 'income',
+            periodMonth: params.period,
+            itemRemainingAfter: itemRemAfter,
+            paymentMethod: params.paymentMethod || 'cash',
+            recordedBy: currentUserName,
+            status: 'completed',
+            notes: params.notes,
+          });
+          return;
+        }
+
+        txCounter += 1;
+        syncedPayments.push({
+          id: `PAY-${Date.now() + txCounter}-${params.period.slice(-2).toUpperCase()}`,
+          studentId: entityId,
+          studentName: displayName,
+          floor: displayFloor,
+          roomNumber: displayRoom,
+          bedLabel: displayBedLabel,
+          amount: params.targetPaid,
+          paymentDate: pDateTime,
+          paymentTime: pTime,
+          date: pDateOnly,
+          paidUntil: pUntil,
+          type: 'income',
+          periodMonth: params.period,
+          itemRemainingAfter: itemRemAfter,
+          paymentMethod: params.paymentMethod || 'cash',
+          recordedBy: currentUserName,
+          status: 'completed',
+          notes: params.notes,
+        });
+      };
+
+      ACADEMIC_BILLING_MONTHS.forEach((m) => {
+        const entry = sanitizedMonths[m.period];
+        if (entry) {
+          const expectedRate = entry.scheduledAmount && entry.scheduledAmount > 0 ? entry.scheduledAmount : effectiveRate;
+          reconcilePeriodTransactions({
+            period: m.period,
+            targetPaid: entry.paidAmount,
+            targetExpected: expectedRate,
+            status: entry.status,
+            paymentDate: entry.paymentDate,
+            paidUntil: entry.paidUntil,
+            paymentMethod: entry.paymentMethod,
+            notes: entry.notes,
+          });
+        }
+      });
+
+      const nextPayments = [...syncedPayments, ...preservedPayments].sort(comparePaymentsChronoDesc);
+
+      const summary = computeStudentBillingSummary({
+        entityId,
+        student: targetStudent,
+        application: targetApp,
+        contract: activeCnt,
+        rooms: prev.rooms,
+        settings: prev.settings,
+        payments: nextPayments,
+        ledger: nextLedger,
+      });
+
+      const computedPaidUntil = summary.paidUntilDate || '';
+      const expiryInfo = computePaymentExpiryInfo(computedPaidUntil);
+      const computedPaymentStatus: 'paid' | 'due_soon' | 'overdue' =
+        expiryInfo.status === 'overdue'
+          ? 'overdue'
+          : expiryInfo.status === 'expiring_soon'
+          ? 'due_soon'
+          : expiryInfo.status === 'active'
+          ? 'paid'
+          : summary.remainingBalance > 0
+          ? 'overdue'
+          : 'paid';
+
+      const datedEntries = Object.values(sanitizedMonths)
+        .map((m) => m.paymentDate)
+        .filter((d): d is string => Boolean(d))
+        .sort();
+      const latestPayDate = datedEntries.length > 0 ? datedEntries[datedEntries.length - 1] : undefined;
+
+      const updatedStudents = prev.students.map((s: Student) => {
+        if (s.id === entityId || (targetApp?.studentId && s.id === targetApp.studentId)) {
+          return {
+            ...s,
+            monthlyTariff: summary.monthlyRate,
+            debtAmount: summary.remainingBalance,
+            paymentStatus: computedPaymentStatus,
+            paidUntil: computedPaidUntil,
+            nextPaymentDueDate: computedPaidUntil,
+            nextPaymentDate: computedPaidUntil,
+            lastPaymentDate: latestPayDate || s.lastPaymentDate,
+          };
+        }
+        return s;
+      });
+
+      const updatedApplications = prev.applications.map((a: Application) => {
+        if (a.id === entityId || (targetStudent?.applicationId && a.id === targetStudent.applicationId)) {
+          return {
+            ...a,
+            monthlyTariff: summary.monthlyRate,
+          };
+        }
+        return a;
+      });
+
+      const updatedContracts = prev.contracts.map((c: Contract) => {
+        if (
+          c.status === 'active' &&
+          (c.studentId === entityId || (targetApp?.studentId && c.studentId === targetApp.studentId))
+        ) {
+          return {
+            ...c,
+            tariffMonthly: summary.monthlyRate,
+          };
+        }
+        return c;
+      });
+
       return {
         ...prev,
-        payments: [newPayment, ...prev.payments],
+        billingLedgers: nextLedgers,
+        payments: nextPayments,
         students: updatedStudents,
-        notifications: [
-          {
-            id: `notif-${Date.now()}`,
-            type: 'payment',
-            title: 'To\'lov qabul qilindi',
-            message: `${std?.fullName || 'Talaba'} tomonidan ${amount.toLocaleString()} UZS to'landi. Keyingi to'lov sanasi uzaytirildi.`,
-            date: new Date().toISOString().replace('T', ' ').slice(0, 16),
-            isRead: false,
-            recipientRole: 'all',
-          },
-          ...prev.notifications,
-        ],
+        applications: updatedApplications,
+        contracts: updatedContracts,
       };
     });
 
-    addAudit('To\'lov qabul qilindi', 'Payment', newPayment.id, undefined, `${amount} UZS`);
-    return newPayment;
+    const syncTargetStudent = students.find((s: Student) => s.id === entityId);
+    const syncSanitizedOverride =
+      updates.monthlyRateOverride !== undefined &&
+      Number.isFinite(updates.monthlyRateOverride) &&
+      updates.monthlyRateOverride > 0
+        ? safeAmount(updates.monthlyRateOverride)
+        : undefined;
+    const syncPaymentsToPersist: Payment[] = [];
+    const syncPaidUntilDates: string[] = [];
+    if (isValidIsoDate(updates.paidUntil)) {
+      syncPaidUntilDates.push(updates.paidUntil!.trim());
+    }
+    let syncTxIdx = 0;
+    ACADEMIC_BILLING_MONTHS.forEach((m) => {
+      const raw = updates.months[m.period];
+      const st = raw?.status || 'pending';
+      const paidAmt = st === 'pending' ? 0 : safeAmount(raw?.paidAmount);
+      if (st === 'pending' || paidAmt <= 0) return;
+
+      const pDt = ensureDateTimeValue(raw?.paymentDate || nowDateTime);
+      const pUntil = isValidIsoDate(raw?.paidUntil)
+        ? raw!.paidUntil!.trim()
+        : addDaysToDateStr(pDt, 30);
+      if (isValidIsoDate(pUntil)) syncPaidUntilDates.push(pUntil);
+
+      const existingRows = payments.filter(
+        (p: Payment) =>
+          p.studentId === entityId && p.periodMonth === m.period && p.status === 'completed'
+      );
+      const existingSum = existingRows.reduce((acc: number, p: Payment) => acc + safeAmount(p.amount), 0);
+
+      if (existingRows.length > 0 && existingSum === paidAmt) {
+        existingRows.forEach((p: Payment) => {
+          syncPaymentsToPersist.push({
+            ...p,
+            paidUntil: isValidIsoDate(raw?.paidUntil) ? raw!.paidUntil!.trim() : p.paidUntil || pUntil,
+          });
+        });
+      } else if (existingRows.length > 0 && paidAmt > existingSum) {
+        existingRows.forEach((p: Payment) => syncPaymentsToPersist.push(p));
+        syncTxIdx += 1;
+        syncPaymentsToPersist.push({
+          id: `PAY-${Date.now() + syncTxIdx}-${m.period.slice(-2).toUpperCase()}`,
+          studentId: entityId,
+          studentName: syncTargetStudent?.fullName || 'Rezident',
+          floor: syncTargetStudent?.floor,
+          roomNumber: syncTargetStudent?.roomNumber || '---',
+          bedLabel: syncTargetStudent?.bedIdentifier,
+          amount: paidAmt - existingSum,
+          paymentDate: pDt,
+          paymentTime: extractTimePart(pDt),
+          date: extractDatePart(pDt),
+          paidUntil: pUntil,
+          type: 'income',
+          periodMonth: m.period,
+          paymentMethod: normalizeBillingMethod(raw?.paymentMethod) || 'cash',
+          recordedBy: currentUserName,
+          status: 'completed',
+          notes: raw?.notes?.trim() || undefined,
+        });
+      } else {
+        syncTxIdx += 1;
+        syncPaymentsToPersist.push({
+          id: `PAY-${Date.now() + syncTxIdx}-${m.period.slice(-2).toUpperCase()}`,
+          studentId: entityId,
+          studentName: syncTargetStudent?.fullName || 'Rezident',
+          floor: syncTargetStudent?.floor,
+          roomNumber: syncTargetStudent?.roomNumber || '---',
+          bedLabel: syncTargetStudent?.bedIdentifier,
+          amount: paidAmt,
+          paymentDate: pDt,
+          paymentTime: extractTimePart(pDt),
+          date: extractDatePart(pDt),
+          paidUntil: pUntil,
+          type: 'income',
+          periodMonth: m.period,
+          paymentMethod: normalizeBillingMethod(raw?.paymentMethod) || 'cash',
+          recordedBy: currentUserName,
+          status: 'completed',
+          notes: raw?.notes?.trim() || undefined,
+        });
+      }
+    });
+    syncPaidUntilDates.sort();
+    const resolvedLedgerPaidUntil =
+      syncPaidUntilDates.length > 0
+        ? syncPaidUntilDates[syncPaidUntilDates.length - 1]
+        : '';
+
+    void syncReplaceResidentPayments({
+      residentId: entityId,
+      payments: syncPaymentsToPersist,
+      paidUntil: resolvedLedgerPaidUntil,
+      monthlyRate: syncSanitizedOverride,
+      hasResidentRecord: Boolean(syncTargetStudent),
+    });
+
+    addAudit('To‘lov jadvali yangilandi', 'BillingLedger', entityId);
+  };
+
+  // Upsert a single monthly billing entry (YYYY-MM) without duplicating rows
+  const upsertBillingEntry: DormContextType['upsertBillingEntry'] = (params) => {
+    const {
+      entityId,
+      periodMonth,
+      paidAmount,
+      status,
+      paymentMethod,
+      paymentDate,
+      paidUntil,
+      notes,
+      monthlyRateOverride,
+    } = params;
+    const targetStudent = students.find((s: Student) => s.id === entityId);
+    const targetApp = targetStudent
+      ? findLinkedApplication(targetStudent, applications)
+      : applications.find((a: Application) => a.id === entityId);
+    const activeCnt = targetStudent
+      ? contracts.find((c: Contract) => c.studentId === targetStudent.id && c.status === 'active')
+      : undefined;
+
+    const currentLedger = billingLedgers[entityId];
+    const currentSummary = computeStudentBillingSummary({
+      entityId,
+      student: targetStudent,
+      application: targetApp,
+      contract: activeCnt,
+      rooms,
+      settings,
+      payments,
+      ledger: currentLedger,
+    });
+
+    const nextOverride =
+      monthlyRateOverride !== undefined
+        ? monthlyRateOverride > 0
+          ? safeAmount(monthlyRateOverride)
+          : undefined
+        : currentLedger?.monthlyRateOverride;
+
+    const nextMonths: Record<string, MonthlyBillingEntry> = {};
+    currentSummary.months.forEach((m) => {
+      nextMonths[m.period] = {
+        period: m.period,
+        status: m.status,
+        paidAmount: m.paidAmount,
+        paymentDate: m.paymentDate,
+        paidUntil: m.paidUntil,
+        paymentMethod: m.paymentMethod,
+        notes: m.notes,
+      };
+    });
+
+    const cleanAmount = safeAmount(paidAmount, 0);
+    const cleanMethod = normalizeBillingMethod(paymentMethod) || 'cash';
+    const cleanDateTime = ensureDateTimeValue(paymentDate);
+    const cleanPaidUntil = isValidIsoDate(paidUntil)
+      ? paidUntil!.trim()
+      : addDaysToDateStr(cleanDateTime, 30);
+    const cleanNotes = notes?.trim() || undefined;
+
+    const effectiveRate = nextOverride ?? currentSummary.monthlyRate;
+    const finalMonthPaid =
+      status === 'pending'
+        ? 0
+        : status === 'paid' && cleanAmount === 0
+        ? effectiveRate
+        : cleanAmount;
+
+    nextMonths[periodMonth] = {
+      period: periodMonth,
+      status,
+      paidAmount: finalMonthPaid,
+      paymentDate: status === 'pending' ? undefined : cleanDateTime,
+      paidUntil: status === 'pending' ? undefined : cleanPaidUntil,
+      paymentMethod: status === 'pending' ? undefined : cleanMethod,
+      notes: cleanNotes,
+      updatedAt: new Date().toISOString(),
+    };
+
+    updateStudentBillingLedger(entityId, {
+      monthlyRateOverride: nextOverride,
+      paidUntil: status === 'pending' ? currentLedger?.paidUntil : cleanPaidUntil,
+      months: nextMonths,
+    });
   };
 
   const createIssue = (issueData: {
@@ -1790,6 +4031,226 @@ export const DormProvider: React.FC<{ children: React.ReactNode }> = ({ children
     addAudit('Xodim statusi o\'zgartirildi', 'Employee', id);
   };
 
+  // ==========================================
+  // OWNER STAFF & PASSWORDS (Supabase staff_users)
+  // ==========================================
+
+  const generateStaffUuid = (): string => {
+    if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+      return crypto.randomUUID();
+    }
+    const bytes = new Uint8Array(16);
+    if (typeof crypto !== 'undefined' && typeof crypto.getRandomValues === 'function') {
+      crypto.getRandomValues(bytes);
+    } else {
+      for (let i = 0; i < 16; i++) bytes[i] = Math.floor(Math.random() * 256);
+    }
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    const hex = Array.from(bytes).map((b) => b.toString(16).padStart(2, '0'));
+    return `${hex.slice(0, 4).join('')}-${hex.slice(4, 6).join('')}-${hex.slice(6, 8).join('')}-${hex.slice(8, 10).join('')}-${hex.slice(10, 16).join('')}`;
+  };
+
+  const refreshStaffUsers = useCallback(async () => {
+    const remote = await fetchStaffUsersFromSupabase();
+    if (remote !== null) {
+      setState((prev: typeof state) => ({
+        ...prev,
+        staffUsers: remote,
+      }));
+    }
+  }, []);
+
+  const addStaffUser: DormContextType['addStaffUser'] = async (data) => {
+    if (role !== 'owner' || activeStaffUser) {
+      return { success: false, errorCode: 'unauthorized' };
+    }
+
+    const fullName = data.fullName.trim();
+    const roleTitle = data.roleTitle.trim();
+    const login = data.login.trim();
+    const password = data.password;
+
+    if (!fullName || !roleTitle || !login || !password) {
+      return { success: false, errorCode: 'missing_fields' };
+    }
+
+    const loweredLogin = login.toLowerCase();
+    if (loweredLogin === 'owner' || loweredLogin === 'admin') {
+      return { success: false, errorCode: 'reserved_login' };
+    }
+
+    const exists = (staffUsers as StaffUser[]).some(
+      (s) => s.login.trim().toLowerCase() === loweredLogin
+    );
+    if (exists) {
+      return { success: false, errorCode: 'duplicate_login' };
+    }
+
+    if (!validateStrongPassword(password).isValid) {
+      return { success: false, errorCode: 'weak_password' };
+    }
+
+    const nowDisplay = new Date().toISOString().replace('T', ' ').slice(0, 16);
+    const newStaff: StaffUser = {
+      id: generateStaffUuid(),
+      fullName,
+      roleTitle,
+      login,
+      password,
+      isActive: data.isActive !== false,
+      createdAt: nowDisplay,
+    };
+
+    const syncRes = await syncInsertStaffUser(newStaff);
+    if (!syncRes.ok) {
+      return { success: false, errorCode: 'sync_error', errorMessage: syncRes.error };
+    }
+
+    const savedStaff = syncRes.saved || newStaff;
+    setState((prev: typeof state) => ({
+      ...prev,
+      staffUsers: [savedStaff, ...(Array.isArray(prev.staffUsers) ? prev.staffUsers : [])],
+    }));
+
+    addAudit('Xodim akkaunti yaratildi', 'StaffUser', savedStaff.id, undefined, `${savedStaff.fullName} (${savedStaff.roleTitle})`);
+    return { success: true, staffUser: savedStaff };
+  };
+
+  const updateStaffUser: DormContextType['updateStaffUser'] = async (id, updates) => {
+    if (role !== 'owner' || activeStaffUser) {
+      return { success: false, errorCode: 'unauthorized' };
+    }
+
+    const existing = (staffUsers as StaffUser[]).find((s) => s.id === id);
+    if (!existing) {
+      return { success: false, errorCode: 'not_found' };
+    }
+
+    const nextFullName = updates.fullName !== undefined ? updates.fullName.trim() : existing.fullName;
+    const nextRoleTitle = updates.roleTitle !== undefined ? updates.roleTitle.trim() : existing.roleTitle;
+    const nextLogin = updates.login !== undefined ? updates.login.trim() : existing.login;
+    const nextPassword =
+      updates.password !== undefined && updates.password !== ''
+        ? updates.password
+        : existing.password;
+    const nextIsActive = updates.isActive !== undefined ? Boolean(updates.isActive) : existing.isActive;
+
+    if (!nextFullName || !nextRoleTitle || !nextLogin) {
+      return { success: false, errorCode: 'missing_fields' };
+    }
+
+    const loweredLogin = nextLogin.toLowerCase();
+    if (loweredLogin === 'owner' || loweredLogin === 'admin') {
+      return { success: false, errorCode: 'reserved_login' };
+    }
+
+    const duplicate = (staffUsers as StaffUser[]).some(
+      (s) => s.id !== id && s.login.trim().toLowerCase() === loweredLogin
+    );
+    if (duplicate) {
+      return { success: false, errorCode: 'duplicate_login' };
+    }
+
+    if (updates.password !== undefined && updates.password !== '') {
+      if (!validateStrongPassword(updates.password).isValid) {
+        return { success: false, errorCode: 'weak_password' };
+      }
+    }
+
+    const syncRes = await syncUpdateStaffUser(id, {
+      fullName: nextFullName,
+      roleTitle: nextRoleTitle,
+      login: nextLogin,
+      ...(updates.password !== undefined && updates.password !== ''
+        ? { password: updates.password }
+        : {}),
+      isActive: nextIsActive,
+    });
+
+    if (!syncRes.ok) {
+      return { success: false, errorCode: 'sync_error', errorMessage: syncRes.error };
+    }
+
+    setState((prev: typeof state) => ({
+      ...prev,
+      staffUsers: (Array.isArray(prev.staffUsers) ? prev.staffUsers : []).map((s: StaffUser) =>
+        s.id === id
+          ? {
+              ...s,
+              fullName: nextFullName,
+              roleTitle: nextRoleTitle,
+              login: nextLogin,
+              password: nextPassword,
+              isActive: nextIsActive,
+            }
+          : s
+      ),
+    }));
+
+    addAudit(
+      updates.password ? 'Xodim paroli/ma\'lumotlari yangilandi' : 'Xodim ma\'lumotlari yangilandi',
+      'StaffUser',
+      id,
+      existing.login,
+      `${nextFullName} (${nextRoleTitle})`
+    );
+    return { success: true };
+  };
+
+  const toggleStaffUserActive: DormContextType['toggleStaffUserActive'] = async (id) => {
+    if (role !== 'owner' || activeStaffUser) {
+      return { success: false };
+    }
+
+    const existing = (staffUsers as StaffUser[]).find((s) => s.id === id);
+    if (!existing) return { success: false };
+
+    const nextActive = !existing.isActive;
+    const syncRes = await syncUpdateStaffUser(id, { isActive: nextActive });
+    if (!syncRes.ok) {
+      return { success: false, errorMessage: syncRes.error };
+    }
+
+    setState((prev: typeof state) => ({
+      ...prev,
+      staffUsers: (Array.isArray(prev.staffUsers) ? prev.staffUsers : []).map((s: StaffUser) =>
+        s.id === id ? { ...s, isActive: nextActive } : s
+      ),
+    }));
+
+    addAudit(
+      'Xodim holati o\'zgartirildi',
+      'StaffUser',
+      id,
+      existing.isActive ? 'active' : 'inactive',
+      nextActive ? 'active' : 'inactive'
+    );
+    return { success: true };
+  };
+
+  const deleteStaffUser: DormContextType['deleteStaffUser'] = async (id) => {
+    if (role !== 'owner' || activeStaffUser) {
+      return { success: false };
+    }
+
+    const existing = (staffUsers as StaffUser[]).find((s) => s.id === id);
+    const syncRes = await syncDeleteStaffUser(id);
+    if (!syncRes.ok) {
+      return { success: false, errorMessage: syncRes.error };
+    }
+
+    setState((prev: typeof state) => ({
+      ...prev,
+      staffUsers: (Array.isArray(prev.staffUsers) ? prev.staffUsers : []).filter(
+        (s: StaffUser) => s.id !== id
+      ),
+    }));
+
+    addAudit('Xodim akkaunti o\'chirildi', 'StaffUser', id, existing?.fullName, undefined);
+    return { success: true };
+  };
+
   const updateSettings = (newSettings: DormSettings) => {
     if (role === 'security') {
       console.warn('Security role is not permitted to modify dorm settings.');
@@ -1803,30 +4264,81 @@ export const DormProvider: React.FC<{ children: React.ReactNode }> = ({ children
         return { ...r, priceMonthly };
       });
       const updatedRoomMap = new Map<string, Room>(updatedRooms.map((r: Room) => [r.id, r]));
-      const updatedStudents = prev.students.map((s: Student) => {
-        if (s.roomId && updatedRoomMap.has(s.roomId)) {
-          const rm = updatedRoomMap.get(s.roomId)!;
-          return {
-            ...s,
-            roomType: rm.type,
-            monthlyTariff: rm.priceMonthly,
-          };
+      const updatedContracts = prev.contracts.map((c: Contract) => {
+        if (c.status === 'active' && c.roomType && newSettings.roomTariffs[c.roomType] !== undefined) {
+          return { ...c, tariffMonthly: newSettings.roomTariffs[c.roomType] };
         }
-        return s;
+        return c;
+      });
+      const updatedStudents = prev.students.map((s: Student) => {
+        const rm = s.roomId ? updatedRoomMap.get(s.roomId) : undefined;
+        const resolvedType = rm?.type || s.roomType;
+        const nextTariff =
+          resolvedType && newSettings.roomTariffs[resolvedType] !== undefined
+            ? newSettings.roomTariffs[resolvedType]
+            : s.monthlyTariff;
+        const nextStudent: Student = {
+          ...s,
+          roomType: resolvedType,
+          monthlyTariff: nextTariff,
+        };
+        const summary = computeStudentBillingSummary({
+          entityId: nextStudent.id,
+          student: nextStudent,
+          application: findLinkedApplication(nextStudent, prev.applications),
+          contract: updatedContracts.find((c: Contract) => c.studentId === nextStudent.id && c.status === 'active'),
+          rooms: updatedRooms,
+          settings: newSettings,
+          payments: prev.payments,
+          ledger: (prev.billingLedgers || {})[nextStudent.id],
+        });
+        return {
+          ...nextStudent,
+          monthlyTariff: summary.monthlyRate,
+          debtAmount: summary.remainingBalance,
+          paymentStatus: (summary.remainingBalance > 0 ? 'overdue' : 'paid') as 'overdue' | 'paid',
+        };
       });
       return {
         ...prev,
         settings: newSettings,
         rooms: updatedRooms,
+        contracts: updatedContracts,
         students: updatedStudents,
       };
     });
+    const updatedRoomsForSync: Room[] = rooms.map((r: Room) => ({
+      ...r,
+      priceMonthly: newSettings.roomTariffs[r.type] ?? r.priceMonthly,
+    }));
+    const updatedStudentsForSync: Student[] = students.map((s: Student) => {
+      const rm: Room | undefined = s.roomId
+        ? updatedRoomsForSync.find((r: Room) => r.id === s.roomId)
+        : undefined;
+      const resolvedType: RoomType | undefined = (rm?.type || s.roomType) as RoomType | undefined;
+      const nextTariff =
+        resolvedType && newSettings.roomTariffs[resolvedType] !== undefined
+          ? newSettings.roomTariffs[resolvedType]
+          : s.monthlyTariff;
+      return {
+        ...s,
+        roomType: resolvedType,
+        monthlyTariff: nextTariff,
+      };
+    });
+    void syncRoomTariffChanges(updatedRoomsForSync, updatedStudentsForSync);
+
     addAudit('Tizim sozlamalari yangilandi', 'Settings', 'global');
   };
 
   const resetToDefaults = () => {
-    const fresh = generateSeedData();
+    const fresh = {
+      ...generateSeedData(),
+      userAccounts: [] as StoredUserAccount[],
+      billingLedgers: {} as Record<string, StudentBillingLedger>,
+    };
     setState(fresh);
+    setActiveStudentId('');
     localStorage.setItem(STORAGE_KEY, JSON.stringify(fresh));
   };
 
@@ -2024,70 +4536,186 @@ export const DormProvider: React.FC<{ children: React.ReactNode }> = ({ children
       if (!trimmed) return undefined;
       const phoneKey = normalizePhoneKey(identifier);
       const list: StoredUserAccount[] = Array.isArray(userAccounts) ? userAccounts : [];
+
+      // Also resolve via Application ID (e.g. RC-2026-XXXX) or Student Passport/App ID
+      const matchedApp = (applications || []).find(
+        (a: Application) =>
+          a.id.trim().toLowerCase() === trimmed ||
+          a.passportNumber.trim().toLowerCase() === trimmed
+      );
+      const matchedStd = (students || []).find(
+        (s: Student) =>
+          s.status !== 'deleted_pending_purge' &&
+          (s.passportNumber.trim().toLowerCase() === trimmed ||
+            (s.applicationId && s.applicationId.trim().toLowerCase() === trimmed))
+      );
+
+      const resolvedPhoneKey =
+        phoneKey.length >= 7
+          ? phoneKey
+          : matchedApp
+          ? normalizePhoneKey(matchedApp.phone)
+          : matchedStd
+          ? normalizePhoneKey(matchedStd.phone)
+          : '';
+
       return list.find((acc) => {
         const accId = acc.identifier.trim().toLowerCase();
+        const accLogin = acc.login?.trim().toLowerCase();
+        const accAppId = acc.applicationId?.trim().toLowerCase();
         const accPhoneKey = normalizePhoneKey(acc.phone);
-        if (accId === trimmed) return true;
-        if (phoneKey.length >= 7 && (accPhoneKey === phoneKey || accId === phoneKey)) return true;
+
+        if (accId === trimmed || (accLogin && accLogin === trimmed) || (accAppId && accAppId === trimmed)) {
+          return true;
+        }
+        if (matchedApp && (acc.applicationId === matchedApp.id || (matchedApp.studentId && acc.studentId === matchedApp.studentId))) {
+          return true;
+        }
+        if (matchedStd && acc.studentId === matchedStd.id) {
+          return true;
+        }
+        if (resolvedPhoneKey.length >= 7 && (accPhoneKey === resolvedPhoneKey || accId === resolvedPhoneKey)) {
+          return true;
+        }
         return false;
       });
     },
-    [userAccounts]
+    [userAccounts, applications, students]
   );
 
   const registerStudentAccount = (params: {
     fullName?: string;
     phone: string;
+    login?: string;
     passwordHash: string;
     passwordSalt: string;
   }): Student => {
     const formattedPhone = formatUzPhoneDisplay(params.phone);
     const phoneKey = normalizePhoneKey(params.phone);
+    const cleanedLogin = params.login?.trim() || undefined;
     const nowIso = new Date().toISOString();
+
+    const matchedApp: Application | undefined = applications.find(
+      (a: Application) => phoneKey.length >= 7 && normalizePhoneKey(a.phone) === phoneKey
+    );
 
     const existingStudent = students.find(
       (s: Student) =>
         s.status !== 'deleted_pending_purge' &&
-        normalizePhoneKey(s.phone) === phoneKey
+        ((matchedApp?.studentId && s.id === matchedApp.studentId) ||
+          (phoneKey.length >= 7 && normalizePhoneKey(s.phone) === phoneKey))
     );
+
+    const fallbackPrefType: RoomType = matchedApp?.preferredRoomType || 'standard';
+    const fallbackTariff =
+      matchedApp?.monthlyTariff ??
+      settings.roomTariffs?.[fallbackPrefType] ??
+      INITIAL_SETTINGS.roomTariffs[fallbackPrefType];
 
     const targetStudent: Student = existingStudent
       ? {
           ...existingStudent,
           fullName: params.fullName?.trim() ? params.fullName.trim() : existingStudent.fullName,
           phone: formattedPhone,
+          applicationId: existingStudent.applicationId || matchedApp?.id,
         }
       : {
           id: `std-${Date.now()}`,
-          fullName: params.fullName?.trim() || formattedPhone,
+          applicationId: matchedApp?.id,
+          fullName: params.fullName?.trim() || matchedApp?.fullName || formattedPhone,
           phone: formattedPhone,
-          birthDate: '',
-          passportNumber: '',
-          university: '',
-          faculty: '',
-          course: 1,
-          group: '',
-          parentPhone: '',
-          permanentAddress: '',
-          status: 'active',
-          monthlyTariff: settings.roomTariffs?.standard ?? INITIAL_SETTINGS.roomTariffs.standard,
-          paidUntil: new Date(Date.now() + 30 * 86400000).toISOString().slice(0, 10),
-          nextPaymentDueDate: new Date(Date.now() + 30 * 86400000).toISOString().slice(0, 10),
+          birthDate: matchedApp?.birthDate || '',
+          passportNumber: matchedApp?.passportNumber || '',
+          passportFrontUrl: matchedApp?.passportFrontUrl,
+          passportBackUrl: matchedApp?.passportBackUrl,
+          university: matchedApp?.university || '',
+          faculty: matchedApp?.faculty || '',
+          degreeLevel: matchedApp?.degreeLevel,
+          course: matchedApp?.course || 1,
+          group: matchedApp?.group || '',
+          parentPhone: matchedApp?.parentPhone || '',
+          permanentAddress: matchedApp?.permanentAddress || '',
+          status: matchedApp?.status === 'approved' ? 'active' : matchedApp ? 'applicant' : 'active',
+          roomType: matchedApp?.preferredRoomType,
+          monthlyTariff: fallbackTariff,
+          paidUntil: '',
+          nextPaymentDueDate: '',
           debtAmount: 0,
           createdAt: nowIso.slice(0, 10),
         };
 
     setState((prev: typeof state) => {
+      let nextBillingLedgers: Record<string, StudentBillingLedger> = {
+        ...(prev.billingLedgers || {}),
+      };
+      let nextPayments = prev.payments;
+
+      if (matchedApp) {
+        if (nextBillingLedgers[matchedApp.id] && !nextBillingLedgers[targetStudent.id]) {
+          nextBillingLedgers = {
+            ...nextBillingLedgers,
+            [targetStudent.id]: {
+              ...nextBillingLedgers[matchedApp.id],
+              studentId: targetStudent.id,
+            },
+          };
+          delete nextBillingLedgers[matchedApp.id];
+        }
+        nextPayments = prev.payments.map((p: Payment) =>
+          p.studentId === matchedApp.id ? { ...p, studentId: targetStudent.id } : p
+        );
+      }
+
+      const summary = computeStudentBillingSummary({
+        entityId: targetStudent.id,
+        student: targetStudent,
+        application: matchedApp,
+        contract: prev.contracts.find((c: Contract) => c.studentId === targetStudent.id && c.status === 'active'),
+        rooms: prev.rooms,
+        settings: prev.settings,
+        payments: nextPayments,
+        ledger: nextBillingLedgers[targetStudent.id],
+      });
+      const computedPaidUntil = summary.paidUntilDate || '';
+      const expiryInfo = computePaymentExpiryInfo(computedPaidUntil);
+      const computedPaymentStatus: 'paid' | 'due_soon' | 'overdue' =
+        expiryInfo.status === 'overdue'
+          ? 'overdue'
+          : expiryInfo.status === 'expiring_soon'
+          ? 'due_soon'
+          : expiryInfo.status === 'active'
+          ? 'paid'
+          : summary.remainingBalance > 0
+          ? 'overdue'
+          : 'paid';
+      const syncedTargetStudent: Student = {
+        ...targetStudent,
+        monthlyTariff: summary.monthlyRate,
+        debtAmount: summary.remainingBalance,
+        paymentStatus: computedPaymentStatus,
+        paidUntil: computedPaidUntil,
+        nextPaymentDueDate: computedPaidUntil,
+        nextPaymentDate: computedPaidUntil,
+      };
+
       const nextStudents = existingStudent
-        ? prev.students.map((s: Student) => (s.id === existingStudent.id ? targetStudent : s))
-        : [targetStudent, ...prev.students];
+        ? prev.students.map((s: Student) => (s.id === existingStudent.id ? syncedTargetStudent : s))
+        : [syncedTargetStudent, ...prev.students];
+
+      const nextApplications = matchedApp
+        ? prev.applications.map((a: Application) =>
+            a.id === matchedApp.id ? { ...a, studentId: a.studentId || targetStudent.id } : a
+          )
+        : prev.applications;
 
       const existingAccounts: StoredUserAccount[] = Array.isArray(prev.userAccounts)
         ? prev.userAccounts
         : [];
       const matchedAccountIndex = existingAccounts.findIndex(
         (acc) =>
-          normalizePhoneKey(acc.phone) === phoneKey ||
+          acc.studentId === targetStudent.id ||
+          (matchedApp && acc.applicationId === matchedApp.id) ||
+          (phoneKey.length >= 7 && normalizePhoneKey(acc.phone) === phoneKey) ||
           acc.identifier.toLowerCase() === phoneKey
       );
 
@@ -2097,9 +4725,11 @@ export const DormProvider: React.FC<{ children: React.ReactNode }> = ({ children
             ? existingAccounts[matchedAccountIndex].id
             : `acct-${Date.now()}`,
         identifier: phoneKey || formattedPhone.toLowerCase(),
+        login: cleanedLogin || (matchedAccountIndex >= 0 ? existingAccounts[matchedAccountIndex].login : undefined),
         phone: formattedPhone,
         role: 'student',
         studentId: targetStudent.id,
+        applicationId: targetStudent.applicationId || matchedApp?.id,
         passwordHash: params.passwordHash,
         passwordSalt: params.passwordSalt,
         updatedAt: nowIso,
@@ -2113,10 +4743,14 @@ export const DormProvider: React.FC<{ children: React.ReactNode }> = ({ children
       return {
         ...prev,
         students: nextStudents,
+        applications: nextApplications,
         userAccounts: nextAccounts,
+        billingLedgers: nextBillingLedgers,
+        payments: nextPayments,
       };
     });
 
+    void syncUpsertResident(targetStudent);
     setActiveStudentId(targetStudent.id);
     setRole('student');
     addAudit('Talaba ro‘yxatdan o‘tdi', 'Auth', targetStudent.id, undefined, formattedPhone);
@@ -2136,11 +4770,20 @@ export const DormProvider: React.FC<{ children: React.ReactNode }> = ({ children
     const nowIso = new Date().toISOString();
 
     const existingAccount = findUserAccountByIdentifier(trimmed);
+    const matchedApp: Application | undefined = applications.find(
+      (a: Application) =>
+        a.id.trim().toLowerCase() === lowered ||
+        a.passportNumber.trim().toLowerCase() === lowered ||
+        (phoneKey.length >= 7 && normalizePhoneKey(a.phone) === phoneKey)
+    );
     const matchedStudent = students.find(
       (s: Student) =>
         s.status !== 'deleted_pending_purge' &&
-        ((phoneKey.length >= 7 && normalizePhoneKey(s.phone) === phoneKey) ||
-          s.passportNumber.trim().toLowerCase() === lowered)
+        ((existingAccount?.studentId && s.id === existingAccount.studentId) ||
+          (matchedApp?.studentId && s.id === matchedApp.studentId) ||
+          (phoneKey.length >= 7 && normalizePhoneKey(s.phone) === phoneKey) ||
+          s.passportNumber.trim().toLowerCase() === lowered ||
+          (s.applicationId && s.applicationId.trim().toLowerCase() === lowered))
     );
     const matchedEmployee = employees.find(
       (e: Employee) =>
@@ -2153,24 +4796,78 @@ export const DormProvider: React.FC<{ children: React.ReactNode }> = ({ children
         ? 'student'
         : existingAccount?.role ||
           (matchedEmployee ? matchedEmployee.role : undefined) ||
-          (matchedStudent ? 'student' : undefined) ||
+          (matchedStudent || matchedApp ? 'student' : undefined) ||
           params.targetRole ||
           'student';
 
-    const resolvedStudentId = existingAccount?.studentId || matchedStudent?.id;
+    let createdStudentFromApp: Student | undefined;
+    if (resolvedRole === 'student' && !matchedStudent && matchedApp) {
+      const prefType: RoomType = matchedApp.preferredRoomType || 'standard';
+      createdStudentFromApp = {
+        id: `std-${Date.now()}`,
+        applicationId: matchedApp.id,
+        fullName: matchedApp.fullName,
+        phone: formatUzPhoneDisplay(matchedApp.phone),
+        birthDate: matchedApp.birthDate,
+        passportNumber: matchedApp.passportNumber,
+        passportFrontUrl: matchedApp.passportFrontUrl,
+        passportBackUrl: matchedApp.passportBackUrl,
+        university: matchedApp.university,
+        faculty: matchedApp.faculty,
+        degreeLevel: matchedApp.degreeLevel,
+        course: matchedApp.course,
+        group: matchedApp.group,
+        parentPhone: matchedApp.parentPhone,
+        permanentAddress: matchedApp.permanentAddress,
+        status: matchedApp.status === 'approved' ? 'active' : 'applicant',
+        roomType: matchedApp.preferredRoomType,
+        monthlyTariff:
+          matchedApp.monthlyTariff ??
+          settings.roomTariffs?.[prefType] ??
+          INITIAL_SETTINGS.roomTariffs[prefType],
+        paidUntil: '',
+        nextPaymentDueDate: '',
+        debtAmount: 0,
+        createdAt: nowIso.slice(0, 10),
+      };
+    }
+
+    const resolvedStudentId =
+      existingAccount?.studentId || matchedStudent?.id || createdStudentFromApp?.id;
+
+    const resolvedPhoneDisplay =
+      existingAccount?.phone ||
+      matchedStudent?.phone ||
+      (matchedApp ? formatUzPhoneDisplay(matchedApp.phone) : formattedPhone);
+    const resolvedPhoneKey = normalizePhoneKey(resolvedPhoneDisplay);
 
     setState((prev: typeof state) => {
       const existingAccounts: StoredUserAccount[] = Array.isArray(prev.userAccounts)
         ? prev.userAccounts
         : [];
 
+      const nextStudents = createdStudentFromApp
+        ? [createdStudentFromApp, ...prev.students]
+        : prev.students;
+
+      const nextApplications =
+        createdStudentFromApp && matchedApp
+          ? prev.applications.map((a: Application) =>
+              a.id === matchedApp.id ? { ...a, studentId: createdStudentFromApp!.id } : a
+            )
+          : prev.applications;
+
       const accountId = existingAccount?.id || `acct-${Date.now()}`;
       const updatedAccount: StoredUserAccount = {
         id: accountId,
-        identifier: existingAccount?.identifier || (phoneKey.length >= 7 ? phoneKey : lowered),
-        phone: existingAccount?.phone || formattedPhone,
+        identifier:
+          existingAccount?.identifier ||
+          (resolvedPhoneKey.length >= 7 ? resolvedPhoneKey : lowered),
+        login: existingAccount?.login,
+        phone: resolvedPhoneDisplay,
         role: resolvedRole,
         studentId: resolvedStudentId,
+        applicationId: existingAccount?.applicationId || matchedApp?.id || matchedStudent?.applicationId,
         passwordHash: params.passwordHash,
         passwordSalt: params.passwordSalt,
         updatedAt: nowIso,
@@ -2182,6 +4879,8 @@ export const DormProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
       return {
         ...prev,
+        students: nextStudents,
+        applications: nextApplications,
         userAccounts: nextAccounts,
       };
     });
@@ -2197,6 +4896,130 @@ export const DormProvider: React.FC<{ children: React.ReactNode }> = ({ children
     return { success: true, role: resolvedRole, studentId: resolvedStudentId };
   };
 
+  const ensureStudentForIdentifier = (identifier: string): string | undefined => {
+    const trimmed = identifier.trim();
+    if (!trimmed) return undefined;
+    const lowered = trimmed.toLowerCase();
+    const phoneKey = normalizePhoneKey(trimmed);
+
+    const matchedStd = students.find(
+      (s: Student) =>
+        s.status !== 'deleted_pending_purge' &&
+        ((phoneKey.length >= 7 && normalizePhoneKey(s.phone) === phoneKey) ||
+          s.passportNumber.trim().toLowerCase() === lowered ||
+          (s.applicationId && s.applicationId.trim().toLowerCase() === lowered))
+    );
+    if (matchedStd) {
+      setActiveStudentId(matchedStd.id);
+      return matchedStd.id;
+    }
+
+    const matchedApp = applications.find(
+      (a: Application) =>
+        a.id.trim().toLowerCase() === lowered ||
+        a.passportNumber.trim().toLowerCase() === lowered ||
+        (phoneKey.length >= 7 && normalizePhoneKey(a.phone) === phoneKey)
+    );
+    if (!matchedApp) return undefined;
+
+    if (matchedApp.studentId) {
+      setActiveStudentId(matchedApp.studentId);
+      return matchedApp.studentId;
+    }
+
+    const prefType: RoomType = matchedApp.preferredRoomType || 'standard';
+    const newStudent: Student = {
+      id: `std-${Date.now()}`,
+      applicationId: matchedApp.id,
+      fullName: matchedApp.fullName,
+      phone: formatUzPhoneDisplay(matchedApp.phone),
+      birthDate: matchedApp.birthDate,
+      passportNumber: matchedApp.passportNumber,
+      passportFrontUrl: matchedApp.passportFrontUrl,
+      passportBackUrl: matchedApp.passportBackUrl,
+      university: matchedApp.university,
+      faculty: matchedApp.faculty,
+      degreeLevel: matchedApp.degreeLevel,
+      course: matchedApp.course,
+      group: matchedApp.group,
+      parentPhone: matchedApp.parentPhone,
+      permanentAddress: matchedApp.permanentAddress,
+      status: matchedApp.status === 'approved' ? 'active' : 'applicant',
+      roomType: matchedApp.preferredRoomType,
+      monthlyTariff:
+        matchedApp.monthlyTariff ??
+        settings.roomTariffs?.[prefType] ??
+        INITIAL_SETTINGS.roomTariffs[prefType],
+      paidUntil: '',
+      nextPaymentDueDate: '',
+      debtAmount: 0,
+      createdAt: new Date().toISOString().slice(0, 10),
+    };
+
+    setState((prev: typeof state) => {
+      let nextBillingLedgers: Record<string, StudentBillingLedger> = {
+        ...(prev.billingLedgers || {}),
+      };
+      if (nextBillingLedgers[matchedApp.id] && !nextBillingLedgers[newStudent.id]) {
+        nextBillingLedgers = {
+          ...nextBillingLedgers,
+          [newStudent.id]: {
+            ...nextBillingLedgers[matchedApp.id],
+            studentId: newStudent.id,
+          },
+        };
+        delete nextBillingLedgers[matchedApp.id];
+      }
+      const nextPayments = prev.payments.map((p: Payment) =>
+        p.studentId === matchedApp.id ? { ...p, studentId: newStudent.id } : p
+      );
+
+      const summary = computeStudentBillingSummary({
+        entityId: newStudent.id,
+        student: newStudent,
+        application: matchedApp,
+        rooms: prev.rooms,
+        settings: prev.settings,
+        payments: nextPayments,
+        ledger: nextBillingLedgers[newStudent.id],
+      });
+      const computedPaidUntil = summary.paidUntilDate || '';
+      const expiryInfo = computePaymentExpiryInfo(computedPaidUntil);
+      const computedPaymentStatus: 'paid' | 'due_soon' | 'overdue' =
+        expiryInfo.status === 'overdue'
+          ? 'overdue'
+          : expiryInfo.status === 'expiring_soon'
+          ? 'due_soon'
+          : expiryInfo.status === 'active'
+          ? 'paid'
+          : summary.remainingBalance > 0
+          ? 'overdue'
+          : 'paid';
+      const syncedStudent: Student = {
+        ...newStudent,
+        monthlyTariff: summary.monthlyRate,
+        debtAmount: summary.remainingBalance,
+        paymentStatus: computedPaymentStatus,
+        paidUntil: computedPaidUntil,
+        nextPaymentDueDate: computedPaidUntil,
+        nextPaymentDate: computedPaidUntil,
+      };
+
+      return {
+        ...prev,
+        students: [syncedStudent, ...prev.students],
+        applications: prev.applications.map((a: Application) =>
+          a.id === matchedApp.id ? { ...a, studentId: newStudent.id } : a
+        ),
+        billingLedgers: nextBillingLedgers,
+        payments: nextPayments,
+      };
+    });
+    void syncUpsertResident(newStudent);
+    setActiveStudentId(newStudent.id);
+    return newStudent.id;
+  };
+
   const contextValue = useMemo(
     () => ({
       role,
@@ -2204,6 +5027,8 @@ export const DormProvider: React.FC<{ children: React.ReactNode }> = ({ children
       currentUserName,
       activeStudentId,
       setActiveStudentId,
+      activeStaffUser,
+      setActiveStaffUser,
       rooms,
       commonAreas,
       students,
@@ -2211,6 +5036,7 @@ export const DormProvider: React.FC<{ children: React.ReactNode }> = ({ children
       payments,
       contracts,
       employees,
+      staffUsers,
       issues,
       disciplineRecords,
       notifications,
@@ -2219,14 +5045,19 @@ export const DormProvider: React.FC<{ children: React.ReactNode }> = ({ children
       stats,
       roomFilter,
       setRoomFilter,
+      isLoadingData,
+      refreshFromSupabase,
       addStudent,
+      createResidentWithPlacement,
       updateStudent,
       deleteStudent,
       submitApplication,
       reviewApplication,
+      deleteApplication,
       assignBed,
       transferBed,
       releaseBed,
+      resetAllBedsToAvailable,
       canConfigureRooms,
       addRoom,
       updateRoom,
@@ -2237,11 +5068,19 @@ export const DormProvider: React.FC<{ children: React.ReactNode }> = ({ children
       deleteCommonArea,
       recordPayment,
       handleAcceptPayment,
+      billingLedgers,
+      updateStudentBillingLedger,
+      upsertBillingEntry,
       createIssue,
       updateIssueStatus,
       addDisciplineRecord,
       addEmployee,
       toggleEmployeeStatus,
+      refreshStaffUsers,
+      addStaffUser,
+      updateStaffUser,
+      toggleStaffUserActive,
+      deleteStaffUser,
       updateSettings,
       resetToDefaults,
       markNotificationAsRead,
@@ -2263,11 +5102,13 @@ export const DormProvider: React.FC<{ children: React.ReactNode }> = ({ children
       findUserAccountByIdentifier,
       registerStudentAccount,
       resetUserPassword,
+      ensureStudentForIdentifier,
     }),
     [
       role,
       currentUserName,
       activeStudentId,
+      activeStaffUser,
       rooms,
       commonAreas,
       students,
@@ -2275,6 +5116,7 @@ export const DormProvider: React.FC<{ children: React.ReactNode }> = ({ children
       payments,
       contracts,
       employees,
+      staffUsers,
       issues,
       disciplineRecords,
       notifications,
@@ -2282,7 +5124,11 @@ export const DormProvider: React.FC<{ children: React.ReactNode }> = ({ children
       settings,
       stats,
       roomFilter,
+      isLoadingData,
+      refreshFromSupabase,
+      refreshStaffUsers,
       canConfigureRooms,
+      billingLedgers,
       accessTerminals,
       accessLogs,
       accessPolicy,

@@ -58,10 +58,10 @@ export const I18nProvider: React.FC<{ children: React.ReactNode }> = ({ children
       let text = currentDict[key];
 
       // Safe fallback: try Uzbek first, then key itself
-      if (!text && language !== 'uz') {
+      if (text === undefined && language !== 'uz') {
         text = dictionaries.uz[key];
       }
-      if (!text) {
+      if (text === undefined) {
         text = key;
       }
 

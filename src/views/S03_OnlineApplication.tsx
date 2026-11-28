@@ -1,8 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { useDorm } from '../context/DormContext';
 import { useI18n } from '../i18n/I18nContext';
-import { RoomType, ROOM_TYPE_ORDER, ROOM_TYPE_CAPACITY } from '../types';
-import { CheckCircle2, Upload, Send, ArrowLeft, X, FileText, AlertCircle, Sun, Moon } from 'lucide-react';
+import { RoomType, ROOM_TYPE_ORDER, ROOM_TYPE_CAPACITY, Application } from '../types';
+import { CheckCircle2, Upload, Send, ArrowLeft, X, FileText, AlertCircle, Sun, Moon, Copy, Check, LogIn } from 'lucide-react';
 import { BrandLogo } from '../components/BrandLogo';
 import { LanguageSwitcher } from '../components/LanguageSwitcher';
 import { formatPassportNumber, isValidPassportNumber, getPassportValidationError } from '../utils/maskUtils';
@@ -13,6 +13,7 @@ import { validateCalendarDate } from '../utils/dateValidation';
 interface PublicAppProps {
   onSubmitted: () => void;
   onBackToLogin: () => void;
+  onGoToLogin?: () => void;
   initialRoomType?: RoomType;
 }
 
@@ -65,11 +66,14 @@ export const COURSE_OPTIONS_BY_DEGREE: Record<string, { value: number | string; 
 export const S03_OnlineApplication: React.FC<PublicAppProps> = ({
   onSubmitted,
   onBackToLogin,
+  onGoToLogin,
   initialRoomType,
 }) => {
   const { submitApplication, settings } = useDorm();
   const { t, language } = useI18n();
   const [submitted, setSubmitted] = useState(false);
+  const [submittedApp, setSubmittedApp] = useState<Application | null>(null);
+  const [copiedId, setCopiedId] = useState(false);
   const [agreedToTerms, setAgreedToTerms] = useState(false);
   const [showContractModal, setShowContractModal] = useState(false);
 
@@ -146,8 +150,10 @@ export const S03_OnlineApplication: React.FC<PublicAppProps> = ({
       if (optValue === 1) return t('app.courseMaster1');
       if (optValue === 2) return t('app.courseMaster2');
     }
-    if (degree === 'Doktorantura (PhD / DSc)' && optValue === 1) {
-      return t('app.coursePhd1');
+    if (degree === 'Doktorantura (PhD / DSc)') {
+      if (optValue === 1) return t('app.coursePhd1');
+      if (optValue === 2) return t('app.coursePhd2');
+      if (optValue === 3) return t('app.coursePhd3');
     }
     if (degree === 'Boshqa / Malaka oshirish') {
       if (optValue === 'Tayyorlov kursi') return t('app.coursePrep');
@@ -155,7 +161,10 @@ export const S03_OnlineApplication: React.FC<PublicAppProps> = ({
       if (optValue === 'Malaka oshirish') return t('app.courseAdvanced');
     }
     if (typeof optValue === 'number') {
-      return `${t('app.courseStagePrefix')}${optValue}${t('app.courseStageSuffix')}`;
+      if (optValue >= 1 && optValue <= 5) {
+        return t(`app.course${optValue}`);
+      }
+      return t('app.courseNth', { n: optValue });
     }
     return String(optValue);
   };
@@ -285,23 +294,33 @@ export const S03_OnlineApplication: React.FC<PublicAppProps> = ({
 
     if (!validateForm() || !preferredRoomType) return;
 
-    submitApplication({
+    const createdApp = submitApplication({
       ...formData,
       preferredRoomType,
+      monthlyTariff: settings.roomTariffs[preferredRoomType],
       passportNumber: formData.passportNumber.trim(),
       passportFrontUrl: frontDoc.previewUrl || undefined,
       passportBackUrl: backDoc.previewUrl || undefined,
     });
+    setSubmittedApp(createdApp);
     setSubmitted(true);
+  };
+
+  const handleCopyApplicationId = () => {
+    if (!submittedApp) return;
+    const text = submittedApp.id;
+    if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+      navigator.clipboard.writeText(text).catch(() => {});
+    }
+    setCopiedId(true);
+    window.setTimeout(() => setCopiedId(false), 2000);
   };
 
   const formatPlainSpaceNumber = (amount: number) =>
     amount.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ' ');
 
   const selectedRoomLabel = preferredRoomType
-    ? `${t(`rooms.${preferredRoomType}`)} (${ROOM_TYPE_CAPACITY[preferredRoomType]} ${t('rooms.bedsTotal')}${
-        preferredRoomType.endsWith('_plus') ? `, ${t('rooms.panoramic')}` : ''
-      })`
+    ? `${t(`rooms.${preferredRoomType}`)} (${ROOM_TYPE_CAPACITY[preferredRoomType]} ${t('rooms.bedsTotal')})`
     : '';
 
   const selectedMonthlyTariff = preferredRoomType ? settings.roomTariffs[preferredRoomType] : undefined;
@@ -319,6 +338,7 @@ export const S03_OnlineApplication: React.FC<PublicAppProps> = ({
     group: formData.group,
     roomTypeLabel: selectedRoomLabel,
     monthlyTariffText: selectedMonthlyTariffText,
+    roomCapacity: preferredRoomType ? ROOM_TYPE_CAPACITY[preferredRoomType] : undefined,
   };
 
   const inputBaseClass = isLight
@@ -328,7 +348,7 @@ export const S03_OnlineApplication: React.FC<PublicAppProps> = ({
   const labelClass = `block font-semibold mb-1.5 ${isLight ? 'text-slate-700' : 'text-slate-300'}`;
   const requiredStar = <span className="text-rose-500 font-bold ml-0.5">*</span>;
 
-  if (submitted) {
+  if (submitted && submittedApp) {
     return (
       <div
         className={`min-h-screen flex items-center justify-center p-4 transition-colors duration-300 ${
@@ -336,7 +356,7 @@ export const S03_OnlineApplication: React.FC<PublicAppProps> = ({
         }`}
       >
         <div
-          className={`rounded-3xl p-8 max-w-md w-full text-center shadow-2xl border animate-in zoom-in-95 duration-200 ${
+          className={`rounded-3xl p-6 sm:p-8 max-w-lg w-full text-center shadow-2xl border animate-in zoom-in-95 duration-200 ${
             isLight
               ? 'bg-white border-slate-200 text-[#0A101D]'
               : 'bg-[#101C32] border-[#C6A15B]/35 text-white'
@@ -355,22 +375,92 @@ export const S03_OnlineApplication: React.FC<PublicAppProps> = ({
           <p className={`text-xs mt-2 leading-relaxed ${isLight ? 'text-slate-600' : 'text-slate-300'}`}>
             {t('app.successDesc')}
           </p>
+
+          {/* Application ID Card with One-Click Copy */}
+          <div
+            className={`mt-5 p-4 rounded-2xl border ${
+              isLight
+                ? 'bg-[#F7F5F0] border-[#C6A15B]/45'
+                : 'bg-[#0E1729] border-[#C6A15B]/40'
+            }`}
+          >
+            <div className="text-[11px] font-semibold uppercase tracking-wider text-[#9A7432] dark:text-[#C6A15B]">
+              {t('app.idLabel')}
+            </div>
+            <div className="mt-2 flex items-center justify-center gap-2.5 flex-wrap">
+              <span
+                className={`text-lg sm:text-xl font-mono font-extrabold tracking-wider px-3 py-1 rounded-xl border ${
+                  isLight
+                    ? 'bg-white text-[#101C32] border-slate-200'
+                    : 'bg-[#16233B] text-[#EAD096] border-slate-700'
+                }`}
+              >
+                {submittedApp.id}
+              </span>
+              <button
+                type="button"
+                onClick={handleCopyApplicationId}
+                className={`px-3 py-2 rounded-xl text-xs font-bold inline-flex items-center gap-1.5 border transition-colors cursor-pointer ${
+                  copiedId
+                    ? 'bg-emerald-600 text-white border-emerald-600'
+                    : isLight
+                    ? 'bg-[#101C32] text-[#EAD096] border-[#101C32] hover:bg-[#1A2D4F]'
+                    : 'bg-[#C6A15B] text-[#0A101D] border-[#C6A15B] hover:brightness-110'
+                }`}
+              >
+                {copiedId ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
+                <span>{copiedId ? t('app.copiedBtn') : t('app.copyIdBtn')}</span>
+              </button>
+            </div>
+          </div>
+
+          {/* Next Steps Instructions */}
+          <div
+            className={`mt-4 p-4 rounded-2xl border text-left space-y-1.5 text-xs leading-relaxed ${
+              isLight
+                ? 'bg-slate-50 border-slate-200 text-slate-600'
+                : 'bg-[#0E1729]/70 border-slate-800 text-slate-300'
+            }`}
+          >
+            <p className={`font-bold ${isLight ? 'text-[#101C32]' : 'text-[#EAD096]'}`}>
+              {t('app.nextStepsTitle')}
+            </p>
+            <p>{t('app.nextStep1')}</p>
+            <p>{t('app.nextStep2')}</p>
+          </div>
+
           <div className="mt-6 flex flex-col gap-2">
             <button
+              type="button"
               onClick={onSubmitted}
               className="w-full py-2.5 bg-gradient-to-r from-[#C6A15B] to-[#EAD096] hover:brightness-110 text-[#0A101D] font-bold text-xs rounded-xl shadow-sm transition-all cursor-pointer"
             >
               {t('app.checkStatus')}
             </button>
+            {onGoToLogin && (
+              <button
+                type="button"
+                onClick={onGoToLogin}
+                className={`w-full py-2.5 font-bold text-xs rounded-xl border transition-colors cursor-pointer inline-flex items-center justify-center gap-1.5 ${
+                  isLight
+                    ? 'bg-[#101C32] hover:bg-[#1A2D4F] text-[#EAD096] border-[#C6A15B]/40'
+                    : 'bg-[#16233B] hover:bg-[#1E2F4D] text-[#EAD096] border-[#C6A15B]/40'
+                }`}
+              >
+                <LogIn className="w-3.5 h-3.5 text-[#C6A15B]" />
+                <span>{t('app.openCabinetBtn')}</span>
+              </button>
+            )}
             <button
+              type="button"
               onClick={onBackToLogin}
               className={`w-full py-2.5 font-semibold text-xs rounded-xl transition-colors cursor-pointer ${
                 isLight
                   ? 'bg-slate-100 hover:bg-slate-200 text-slate-700'
-                  : 'bg-[#16233B] hover:bg-[#1E2F4D] text-slate-200'
+                  : 'bg-[#16233B]/60 hover:bg-[#1E2F4D] text-slate-300'
               }`}
             >
-              {t('app.backToLogin')}
+              {t('app.backHomeBtn')}
             </button>
           </div>
         </div>
@@ -497,16 +587,16 @@ export const S03_OnlineApplication: React.FC<PublicAppProps> = ({
       >
         {/* Header */}
         <div
-          className={`flex items-start sm:items-center justify-between border-b pb-5 mb-6 gap-2.5 sm:gap-4 ${
+          className={`flex flex-wrap items-center justify-between border-b pb-5 mb-6 gap-x-4 gap-y-3.5 ${
             isLight ? 'border-slate-200' : 'border-slate-800'
           }`}
         >
-          <div className="flex items-start sm:items-center gap-2.5 sm:gap-3 min-w-0 flex-1">
+          <div className="flex items-center gap-3 min-w-0 flex-1 basis-[260px]">
             <BrandLogo variant="emblem" size="lg" className="shrink-0" />
             <div className="min-w-0">
-              <div className="flex items-center flex-wrap gap-1.5 sm:gap-2">
+              <div className="flex items-center flex-wrap gap-2">
                 <h1
-                  className={`text-base sm:text-lg font-bold tracking-wider uppercase leading-tight ${
+                  className={`text-base sm:text-lg font-bold tracking-wider uppercase leading-none ${
                     isLight ? 'text-[#0A101D]' : 'text-white'
                   }`}
                   style={{ fontFamily: "'Playfair Display', serif" }}
@@ -514,49 +604,49 @@ export const S03_OnlineApplication: React.FC<PublicAppProps> = ({
                   {t('brand.name')}
                 </h1>
                 <span
-                  className={`text-[10px] font-bold uppercase px-2 py-0.5 rounded-md border whitespace-nowrap ${
+                  className={`inline-flex items-center text-[10px] font-bold uppercase tracking-wider px-2 py-1 rounded-md border whitespace-nowrap leading-none ${
                     isLight
-                      ? 'bg-[#C6A15B]/12 text-[#9A7432] border-[#C6A15B]/35'
-                      : 'bg-[#162644] text-[#C6A15B] border-[#C6A15B]/40'
+                      ? 'bg-[#FBF7EE] text-[#7D5B1E] border-[#C6A15B]/50'
+                      : 'bg-[#182947] text-[#F0D79E] border-[#C6A15B]/55'
                   }`}
                 >
                   {t('app.title')}
                 </span>
               </div>
-              <p className={`text-xs mt-1 leading-snug tracking-normal ${isLight ? 'text-slate-500' : 'text-slate-400'}`}>
+              <p className={`text-xs mt-1.5 leading-snug tracking-normal ${isLight ? 'text-slate-600' : 'text-slate-400'}`}>
                 {t('app.subtitle')}
               </p>
             </div>
           </div>
 
-          <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
-            <LanguageSwitcher variant={isLight ? 'light' : 'dark'} />
+          <div className="flex items-center justify-end gap-1.5 sm:gap-2 shrink-0 ml-auto">
+            <LanguageSwitcher variant={isLight ? 'light' : 'dark'} compact />
 
             <button
               type="button"
               onClick={toggleTheme}
               aria-label={isLight ? 'Switch to dark theme' : 'Switch to light theme'}
               title={isLight ? 'Dark Mode' : 'Light Mode'}
-              className={`w-8 h-8 sm:w-9 sm:h-9 rounded-xl border flex items-center justify-center transition-colors cursor-pointer shrink-0 ${
+              className={`w-9 h-9 rounded-xl border flex items-center justify-center transition-colors cursor-pointer shrink-0 ${
                 isLight
                   ? 'bg-slate-50 border-slate-200 hover:border-[#C6A15B] text-[#0A101D] hover:bg-[#C6A15B]/10'
                   : 'bg-[#16233B]/80 border-slate-700/80 hover:border-[#C6A15B]/70 text-[#C6A15B] hover:bg-[#C6A15B]/10'
               }`}
             >
-              {isLight ? <Moon className="w-3.5 h-3.5" /> : <Sun className="w-3.5 h-3.5" />}
+              {isLight ? <Moon className="w-4 h-4" /> : <Sun className="w-4 h-4" />}
             </button>
 
             <button
               type="button"
               onClick={onBackToLogin}
-              className={`h-8 sm:h-9 px-2 sm:px-2.5 rounded-xl text-xs font-medium flex items-center gap-1 transition-colors cursor-pointer shrink-0 ${
+              className={`h-9 px-2.5 rounded-xl border border-transparent text-xs font-semibold inline-flex items-center gap-1.5 whitespace-nowrap transition-colors cursor-pointer shrink-0 ${
                 isLight
-                  ? 'text-slate-500 hover:text-[#0A101D] hover:bg-slate-100'
-                  : 'text-slate-400 hover:text-white hover:bg-slate-800/60'
+                  ? 'text-slate-600 hover:text-[#0A101D] hover:bg-slate-100'
+                  : 'text-slate-300 hover:text-white hover:bg-slate-800/70'
               }`}
             >
-              <ArrowLeft className="w-4 h-4 shrink-0" />
-              <span className="hidden sm:inline">{t('common.back')}</span>
+              <ArrowLeft className="w-3.5 h-3.5 shrink-0" />
+              <span>{t('common.back')}</span>
             </button>
           </div>
         </div>
@@ -756,7 +846,7 @@ export const S03_OnlineApplication: React.FC<PublicAppProps> = ({
             >
               {t('app.eduSection')}
             </h3>
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5 text-xs">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-4 text-xs">
               <div className="sm:col-span-2">
                 <label className={labelClass}>
                   {t('app.university')}
@@ -845,7 +935,7 @@ export const S03_OnlineApplication: React.FC<PublicAppProps> = ({
                 />
               </div>
 
-              <div className="sm:col-span-2">
+              <div className={`sm:col-span-2 pt-3 mt-1 border-t ${isLight ? 'border-slate-100' : 'border-slate-800/80'}`}>
                 <label className={labelClass}>
                   {t('app.roomLabel')}
                   {requiredStar}
@@ -872,8 +962,7 @@ export const S03_OnlineApplication: React.FC<PublicAppProps> = ({
                     const price = settings.roomTariffs[typeOption];
                     return (
                       <option key={typeOption} value={typeOption}>
-                        {t(`rooms.${typeOption}`)} ({ROOM_TYPE_CAPACITY[typeOption]} {t('rooms.bedsTotal')}
-                        {typeOption.endsWith('_plus') ? ` · ${t('rooms.panoramic')}` : ''}) —{' '}
+                        {t(`rooms.${typeOption}`)} ({ROOM_TYPE_CAPACITY[typeOption]} {t('rooms.bedsTotal')}) —{' '}
                         {formatPlainSpaceNumber(price)} UZS {t('common.perMonth')}
                       </option>
                     );

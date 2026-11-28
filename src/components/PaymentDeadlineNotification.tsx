@@ -19,6 +19,16 @@ import {
   ShieldAlert,
 } from 'lucide-react';
 import { Student } from '../types';
+import {
+  comparePaymentsChronoDesc,
+  computePaymentExpiryInfo,
+  computeStudentBillingSummary,
+  findLinkedApplication,
+  formatDateTimeCommaDisplay,
+  formatMethodLabel,
+  formatShortDateDisplay,
+  isMonthlyPaymentRecord,
+} from '../utils/billingUtils';
 
 interface PaymentDeadlineNotificationProps {
   onNavigate: (view: string) => void;
@@ -42,8 +52,17 @@ export const PaymentDeadlineNotification: React.FC<PaymentDeadlineNotificationPr
   onSelectStudent,
   onOpenAddPaymentModal,
 }) => {
-  const { students, payments, handleAcceptPayment } = useDorm();
-  const { t, formatCurrency, formatDate } = useI18n();
+  const {
+    students,
+    applications,
+    contracts,
+    rooms,
+    settings,
+    payments,
+    billingLedgers,
+    handleAcceptPayment,
+  } = useDorm();
+  const { t, language, formatCurrency } = useI18n();
 
   const [isCollapsed, setIsCollapsed] = useState<boolean>(false);
   const [filterDays, setFilterDays] = useState<'all' | 'today' | 'tomorrow' | 'soon'>('all');
@@ -51,26 +70,15 @@ export const PaymentDeadlineNotification: React.FC<PaymentDeadlineNotificationPr
   const [remindedIds, setRemindedIds] = useState<Set<string>>(new Set());
   const [toastMessage, setToastMessage] = useState<string | null>(null);
 
-  // Compute reference today (normalized to 00:00:00)
-  const todayTime = useMemo(() => {
-    const now = new Date();
-    // System reference: fallback to 2026-10-30 if current environment is set around 2026
-    const isYear2026 = now.getFullYear() === 2026;
-    const base = isYear2026 ? now : new Date('2026-10-30');
-    return new Date(base.getFullYear(), base.getMonth(), base.getDate()).getTime();
-  }, []);
-
-  // Pre-index payments by studentId and studentName for rapid lookup
+  // Pre-index monthly payments by studentId and studentName for rapid lookup
   const paymentsByStudent = useMemo(() => {
     const map = new Map<string, typeof payments>();
-    (payments || []).forEach((p) => {
-      // By student ID
+    (payments || []).filter(isMonthlyPaymentRecord).forEach((p) => {
       if (p.studentId) {
         const list = map.get(p.studentId) || [];
         list.push(p);
         map.set(p.studentId, list);
       }
-      // Also map by student Name for flexibility
       if (p.studentName) {
         const key = `name:${p.studentName.trim().toLowerCase()}`;
         const list = map.get(key) || [];
@@ -81,55 +89,64 @@ export const PaymentDeadlineNotification: React.FC<PaymentDeadlineNotificationPr
     return map;
   }, [payments]);
 
-  // Filter students whose payment deadline is approaching within the next 3 days (0, 1, 2, 3 days)
+  // Filter active residents whose paid-through date expires within the next 3 days (0, 1, 2, 3 days)
   const approachingStudents: ApproachingStudentData[] = useMemo(() => {
-    const activeStudents = (students || []).filter(
-      (s) => s.status === 'active' && (s.nextPaymentDate || s.nextPaymentDueDate)
-    );
-
+    const activeStudents = (students || []).filter((s) => s.status === 'active');
     const list: ApproachingStudentData[] = [];
 
     activeStudents.forEach((student) => {
-      const dueDateStr = student.nextPaymentDate || student.nextPaymentDueDate;
-      if (!dueDateStr) return;
+      const linkedApp = findLinkedApplication(student, applications);
+      const activeCnt = contracts.find(
+        (c) => c.studentId === student.id && c.status === 'active'
+      );
+      const summary = computeStudentBillingSummary({
+        entityId: student.id,
+        student,
+        application: linkedApp,
+        contract: activeCnt,
+        rooms,
+        settings,
+        payments,
+        ledger: billingLedgers[student.id],
+      });
 
-      const [y, m, d] = dueDateStr.split('-').map(Number);
-      if (!y || !m || !d) return;
-
-      const dueDateObj = new Date(y, m - 1, d);
-      const dueTime = new Date(dueDateObj.getFullYear(), dueDateObj.getMonth(), dueDateObj.getDate()).getTime();
-      const diffDays = Math.round((dueTime - todayTime) / (1000 * 60 * 60 * 24));
-
-      // Approaching deadline strictly within the next 3 days: 0 (today) up to 3 days
-      if (diffDays >= 0 && diffDays <= 3) {
-        // Query payments system for this student
-        const studentPayments =
-          paymentsByStudent.get(student.id) ||
-          paymentsByStudent.get(`name:${student.fullName.trim().toLowerCase()}`) ||
-          [];
-
-        const completedPayments = studentPayments
-          .filter((p) => p.status === 'completed')
-          .sort((a, b) => (b.paymentDate || '').localeCompare(a.paymentDate || ''));
-
-        const latestPayment = completedPayments[0];
-
-        list.push({
-          student,
-          daysRemaining: diffDays,
-          dueDate: student.nextPaymentDueDate,
-          amountDue: student.monthlyTariff + (student.debtAmount || 0),
-          lastPaymentDate: latestPayment?.paymentDate,
-          lastPaymentAmount: latestPayment?.amount,
-          lastPaymentMethod: latestPayment?.paymentMethod,
-          totalPaymentsCount: completedPayments.length,
-        });
+      const expiry = computePaymentExpiryInfo(summary.paidUntilDate);
+      if (
+        expiry.daysRemaining === null ||
+        expiry.daysRemaining < 0 ||
+        expiry.daysRemaining > 3 ||
+        !summary.paidUntilDate
+      ) {
+        return;
       }
+
+      const studentPayments =
+        paymentsByStudent.get(student.id) ||
+        paymentsByStudent.get(`name:${student.fullName.trim().toLowerCase()}`) ||
+        [];
+
+      const completedPayments = studentPayments
+        .filter((p) => p.status === 'completed')
+        .sort(comparePaymentsChronoDesc);
+
+      const latestPayment = completedPayments[0];
+
+      list.push({
+        student,
+        daysRemaining: expiry.daysRemaining,
+        dueDate: summary.paidUntilDate,
+        amountDue: summary.monthlyRate + (summary.remainingBalance || 0),
+        lastPaymentDate: latestPayment?.paymentDate || summary.lastPaymentDate,
+        lastPaymentAmount: latestPayment?.amount ?? summary.lastPaymentAmount,
+        lastPaymentMethod: latestPayment?.paymentMethod || summary.lastPaymentMethod,
+        totalPaymentsCount: completedPayments.length,
+      });
     });
 
-    // Sort ascending by days remaining (most urgent first: 0 days, then 1, 2, 3)
-    return list.sort((a, b) => a.daysRemaining - b.daysRemaining || a.student.fullName.localeCompare(b.student.fullName));
-  }, [students, paymentsByStudent, todayTime]);
+    return list.sort(
+      (a, b) => a.daysRemaining - b.daysRemaining || a.student.fullName.localeCompare(b.student.fullName)
+    );
+  }, [students, applications, contracts, rooms, settings, payments, billingLedgers, paymentsByStudent]);
 
   // Aggregated totals
   const totalUpcomingRevenue = useMemo(() => {
@@ -161,7 +178,7 @@ export const PaymentDeadlineNotification: React.FC<PaymentDeadlineNotificationPr
   // Action: Send SMS/Telegram Reminder
   const handleSendReminder = (item: ApproachingStudentData) => {
     setRemindedIds((prev) => new Set(prev).add(item.student.id));
-    setToastMessage(`"${item.student.fullName}"ga to‘lov eslatmasi (Telegram & SMS) yuborildi!`);
+    setToastMessage(t('deadline.reminderSentToast', { name: item.student.fullName }));
     setTimeout(() => {
       setToastMessage(null);
     }, 4000);
@@ -180,7 +197,12 @@ export const PaymentDeadlineNotification: React.FC<PaymentDeadlineNotificationPr
   const handleQuickAcceptPayment = (studentId: string, amount: number) => {
     const std = students.find((s) => s.id === studentId);
     handleAcceptPayment(studentId, amount);
-    setToastMessage(`✅ ${std?.fullName || 'Talaba'}: ${formatCurrency(amount)} to‘lov qabul qilindi. Keyingi to‘lov sanasi 1 oyga surildi!`);
+    setToastMessage(
+      t('deadline.paymentAcceptedToast', {
+        name: std?.fullName || t('assign.studentLabel'),
+        amount: formatCurrency(amount),
+      })
+    );
     setTimeout(() => {
       setToastMessage(null);
     }, 6000);
@@ -196,13 +218,13 @@ export const PaymentDeadlineNotification: React.FC<PaymentDeadlineNotificationPr
           </div>
           <div>
             <h4 className="text-xs sm:text-sm font-bold text-emerald-950 flex items-center gap-2">
-              <span>To‘lov intizomi barqaror</span>
+              <span>{t('deadline.stableTitle')}</span>
               <span className="text-[10px] font-extrabold uppercase px-2 py-0.5 rounded-full bg-emerald-200/80 text-emerald-800">
-                Nazorat ostida
+                {t('deadline.underControl')}
               </span>
             </h4>
             <p className="text-[11px] text-emerald-700 mt-0.5 leading-snug">
-              Yaqin 3 kun ichida muddati tugaydigan to‘lovlar mavjud emas. Barcha talabalar to‘lov jadvallari reja asosida.
+              {t('deadline.stableDesc')}
             </p>
           </div>
         </div>
@@ -210,7 +232,7 @@ export const PaymentDeadlineNotification: React.FC<PaymentDeadlineNotificationPr
           onClick={() => onNavigate('S50_Payments')}
           className="px-3 py-1.5 bg-white hover:bg-emerald-50 text-emerald-800 border border-emerald-300 rounded-xl text-xs font-bold transition-colors shrink-0 flex items-center gap-1 cursor-pointer"
         >
-          <span>To‘lovlar daftari</span>
+          <span>{t('deadline.ledgerBtn')}</span>
           <ArrowRight className="w-3.5 h-3.5" />
         </button>
       </div>
@@ -239,18 +261,18 @@ export const PaymentDeadlineNotification: React.FC<PaymentDeadlineNotificationPr
           <div>
             <div className="flex items-center gap-2 flex-wrap">
               <h3 className="font-extrabold text-slate-900 text-sm sm:text-base tracking-tight flex items-center gap-1.5">
-                <span>To‘lov muddati yaqinlashayotgan talabalar</span>
+                <span>{t('deadline.approachingTitle')}</span>
                 <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-black bg-rose-500 text-white shadow-xs">
-                  {approachingStudents.length} ta
+                  {approachingStudents.length}
                 </span>
               </h3>
               <span className="inline-flex items-center gap-1 bg-amber-200/80 text-amber-900 font-bold text-[10px] px-2 py-0.5 rounded-md uppercase tracking-wider">
                 <Clock className="w-3 h-3" />
-                <span>Yaqin 3 kun</span>
+                <span>{t('deadline.next3Days')}</span>
               </span>
             </div>
             <p className="text-xs text-slate-600 mt-0.5">
-              To‘lovlar tizimidan olingan ma’lumotlar asosida: rejalashtirilgan tushum{' '}
+              {t('deadline.plannedRevenueDesc')}{' '}
               <strong className="text-amber-900 font-extrabold">{formatCurrency(totalUpcomingRevenue)}</strong>
             </p>
           </div>
@@ -268,8 +290,8 @@ export const PaymentDeadlineNotification: React.FC<PaymentDeadlineNotificationPr
           <button
             onClick={() => setIsCollapsed(!isCollapsed)}
             className="p-1.5 text-slate-500 hover:text-slate-800 hover:bg-amber-200/50 rounded-xl transition-colors cursor-pointer"
-            title={isCollapsed ? 'Kengaytirish' : 'Yig‘ish'}
-            aria-label="Toggle collapse"
+            title={isCollapsed ? t('common.expand') : t('common.collapse')}
+            aria-label={isCollapsed ? t('common.expand') : t('common.collapse')}
           >
             {isCollapsed ? <ChevronDown className="w-5 h-5" /> : <ChevronUp className="w-5 h-5" />}
           </button>
@@ -291,7 +313,7 @@ export const PaymentDeadlineNotification: React.FC<PaymentDeadlineNotificationPr
                     : 'bg-white/80 hover:bg-white text-slate-700 border border-amber-200'
                 }`}
               >
-                Barchasi ({approachingStudents.length})
+                {t('common.all')} ({approachingStudents.length})
               </button>
               <button
                 onClick={() => setFilterDays('today')}
@@ -301,7 +323,7 @@ export const PaymentDeadlineNotification: React.FC<PaymentDeadlineNotificationPr
                     : 'bg-white/80 hover:bg-white text-rose-800 border border-rose-200'
                 }`}
               >
-                Bugun ({countToday})
+                {t('deadline.filterToday', { count: countToday })}
               </button>
               <button
                 onClick={() => setFilterDays('tomorrow')}
@@ -311,7 +333,7 @@ export const PaymentDeadlineNotification: React.FC<PaymentDeadlineNotificationPr
                     : 'bg-white/80 hover:bg-white text-orange-800 border border-orange-200'
                 }`}
               >
-                Ertaga ({countTomorrow})
+                {t('deadline.filterTomorrow', { count: countTomorrow })}
               </button>
               <button
                 onClick={() => setFilterDays('soon')}
@@ -321,7 +343,7 @@ export const PaymentDeadlineNotification: React.FC<PaymentDeadlineNotificationPr
                     : 'bg-white/80 hover:bg-white text-amber-800 border border-amber-200'
                 }`}
               >
-                2-3 kun ({countSoon})
+                {t('deadline.filterSoon', { count: countSoon })}
               </button>
             </div>
 
@@ -332,7 +354,7 @@ export const PaymentDeadlineNotification: React.FC<PaymentDeadlineNotificationPr
                 type="text"
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
-                placeholder="Talaba yoki xona bo‘yicha izlash..."
+                placeholder={t('deadline.searchPlaceholder')}
                 className="w-full bg-white border border-amber-200 text-xs pl-8 pr-3 py-1.5 rounded-xl focus:outline-none focus:ring-2 focus:ring-amber-500 placeholder:text-slate-400"
               />
             </div>
@@ -348,25 +370,25 @@ export const PaymentDeadlineNotification: React.FC<PaymentDeadlineNotificationPr
                 switch (item.daysRemaining) {
                   case 0:
                     return {
-                      label: 'Bugun to‘lov kuni',
+                      label: t('deadline.dueToday'),
                       badgeClass: 'bg-rose-100 text-rose-800 border-rose-300 font-extrabold animate-pulse',
                       dotClass: 'bg-rose-500',
                     };
                   case 1:
                     return {
-                      label: 'Ertaga (1 kun qoldi)',
+                      label: t('deadline.dueTomorrow'),
                       badgeClass: 'bg-orange-100 text-orange-900 border-orange-300 font-bold',
                       dotClass: 'bg-orange-500',
                     };
                   case 2:
                     return {
-                      label: '2 kun qoldi',
+                      label: t('deadline.dueDays', { days: 2 }),
                       badgeClass: 'bg-amber-100 text-amber-900 border-amber-300 font-bold',
                       dotClass: 'bg-amber-500',
                     };
                   default:
                     return {
-                      label: '3 kun qoldi',
+                      label: t('deadline.dueDays', { days: 3 }),
                       badgeClass: 'bg-amber-50 text-amber-800 border-amber-200 font-medium',
                       dotClass: 'bg-amber-400',
                     };
@@ -399,8 +421,8 @@ export const PaymentDeadlineNotification: React.FC<PaymentDeadlineNotificationPr
                         <div className="flex items-center gap-2 text-[11px] text-slate-500 flex-wrap mt-0.5">
                           <span className="flex items-center gap-1 font-semibold text-slate-700">
                             <Building className="w-3 h-3 text-slate-400" />
-                            <span>{item.student.roomNumber}-xona</span>
-                            {item.student.bedNumber && <span>({item.student.bedNumber}-o‘rin)</span>}
+                            <span>{t('common.room')} {item.student.roomNumber}</span>
+                            {item.student.bedNumber && <span>({t('common.bed')} {item.student.bedNumber})</span>}
                           </span>
                           <span>•</span>
                           <span className="truncate">{item.student.university}</span>
@@ -420,38 +442,33 @@ export const PaymentDeadlineNotification: React.FC<PaymentDeadlineNotificationPr
                   {/* Payment Details Pulled from Payment System */}
                   <div className="bg-slate-50 rounded-xl p-2.5 border border-slate-100 space-y-1.5 text-[11px]">
                     <div className="flex items-center justify-between">
-                      <span className="text-slate-500">Muddati (Sana):</span>
+                      <span className="text-slate-500">{t('deadline.dueDateLabel')}</span>
                       <strong className="text-slate-800 font-mono font-bold flex items-center gap-1">
                         <Calendar className="w-3 h-3 text-amber-600" />
-                        <span>{item.dueDate}</span>
+                        <span>{formatShortDateDisplay(item.dueDate)}</span>
                       </strong>
                     </div>
 
                     <div className="flex items-center justify-between">
-                      <span className="text-slate-500">To‘lanishi lozim:</span>
+                      <span className="text-slate-500">{t('deadline.amountDueLabel')}</span>
                       <strong className="text-emerald-700 font-mono font-bold text-xs">
                         {formatCurrency(item.amountDue)}
                       </strong>
                     </div>
 
                     <div className="flex items-center justify-between pt-1 border-t border-slate-200/60 text-[10px]">
-                      <span className="text-slate-400">Oxirgi to‘lov tizimda:</span>
+                      <span className="text-slate-400">{t('deadline.lastPaymentLabel')}</span>
                       <span className="text-slate-600 font-medium">
                         {item.lastPaymentDate ? (
                           <>
-                            {item.lastPaymentDate}{' '}
+                            {formatDateTimeCommaDisplay(item.lastPaymentDate)}{' '}
                             <span className="text-slate-400">
                               ({formatCurrency(item.lastPaymentAmount || 0)} ·{' '}
-                              {item.lastPaymentMethod === 'card'
-                                ? 'Karta'
-                                : item.lastPaymentMethod === 'cash'
-                                ? 'Naqd'
-                                : 'O‘tkazma'}
-                              )
+                              {formatMethodLabel(item.lastPaymentMethod, language)})
                             </span>
                           </>
                         ) : (
-                          <span className="text-amber-700 font-medium">Ilk to‘lov kutilmoqda</span>
+                          <span className="text-amber-700 font-medium">{t('deadline.awaitingFirstPayment')}</span>
                         )}
                       </span>
                     </div>
@@ -466,7 +483,7 @@ export const PaymentDeadlineNotification: React.FC<PaymentDeadlineNotificationPr
                     >
                       <Phone className="w-3 h-3 text-slate-500" />
                       <span className="hidden sm:inline">{item.student.phone}</span>
-                      <span className="sm:hidden">Qo‘ng‘iroq</span>
+                      <span className="sm:hidden">{t('deadline.call')}</span>
                     </a>
 
                     <div className="flex items-center gap-1.5">
@@ -480,17 +497,17 @@ export const PaymentDeadlineNotification: React.FC<PaymentDeadlineNotificationPr
                             ? 'bg-emerald-50 text-emerald-700 border border-emerald-200 cursor-default'
                             : 'bg-sky-50 hover:bg-sky-100 text-sky-800 border border-sky-200'
                         }`}
-                        title="Telegram va SMS orqali to‘lov eslatmasini yuborish"
+                        title={t('deadline.remindBtn')}
                       >
                         {isReminded ? (
                           <>
                             <Check className="w-3.5 h-3.5 text-emerald-600" />
-                            <span>Yuborildi</span>
+                            <span>{t('deadline.remindedBtn')}</span>
                           </>
                         ) : (
                           <>
                             <Send className="w-3 h-3 text-sky-600" />
-                            <span>Eslatish</span>
+                            <span>{t('deadline.remindBtn')}</span>
                           </>
                         )}
                       </button>
@@ -500,10 +517,10 @@ export const PaymentDeadlineNotification: React.FC<PaymentDeadlineNotificationPr
                         type="button"
                         onClick={() => handleQuickAcceptPayment(item.student.id, item.amountDue || item.student.monthlyTariff)}
                         className="px-2.5 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold rounded-lg shadow-xs transition-colors flex items-center gap-1 cursor-pointer active:scale-95"
-                        title="To‘lovni darhol qabul qilish va keyingi to‘lov muddatini 1 oyga surish"
+                        title={t('deadline.acceptMonthBtn')}
                       >
                         <CheckCircle2 className="w-3.5 h-3.5" />
-                        <span>To‘lov qabul qilish (+1 oy)</span>
+                        <span>{t('deadline.acceptMonthBtn')}</span>
                       </button>
 
                       {/* Custom modal payment */}
@@ -511,8 +528,8 @@ export const PaymentDeadlineNotification: React.FC<PaymentDeadlineNotificationPr
                         type="button"
                         onClick={() => handleRecordPayment(item.student.id)}
                         className="p-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold rounded-lg transition-colors flex items-center justify-center cursor-pointer"
-                        title="Boshqa summa yoki to‘lov usuli bilan kiritish"
-                        aria-label="Batafsil to‘lov oynasi"
+                        title={t('payments.recordNew')}
+                        aria-label={t('payments.recordNew')}
                       >
                         <CreditCard className="w-3.5 h-3.5 text-slate-600" />
                       </button>
@@ -525,7 +542,7 @@ export const PaymentDeadlineNotification: React.FC<PaymentDeadlineNotificationPr
 
           {displayedStudents.length === 0 && (
             <div className="text-center py-6 bg-white/60 rounded-xl border border-dashed border-amber-200 text-xs text-slate-500">
-              Ushbu filtr bo‘yicha talaba topilmadi.
+              {t('deadline.noMatches')}
             </div>
           )}
         </div>

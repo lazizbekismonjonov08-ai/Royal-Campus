@@ -97,8 +97,8 @@ export const S60_RevenueDashboard: React.FC = () => {
 
             return (
               <div key={type} className={`p-4 rounded-2xl border ${cardClasses}`}>
-                <span className={`font-extrabold uppercase tracking-wider text-[11px] block mb-1 ${labelClasses}`}>
-                  {t(`rooms.${type}`).toUpperCase()}
+                <span className={`font-extrabold tracking-wide text-[11px] block mb-1 ${labelClasses}`}>
+                  {t(`rooms.${type}`)}
                 </span>
                 <div className={`text-xl font-extrabold ${labelClasses}`}>
                   {formatCurrency(revenueByType[type])}

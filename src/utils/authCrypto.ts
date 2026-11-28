@@ -153,7 +153,138 @@ export function generateVerificationCode(): string {
   if (typeof crypto !== 'undefined' && typeof crypto.getRandomValues === 'function') {
     const arr = new Uint32Array(1);
     crypto.getRandomValues(arr);
-    return String(100000 + (arr[0] % 900000));
+    return String(1000 + (arr[0] % 9000));
   }
-  return String(Math.floor(100000 + Math.random() * 900000));
+  return String(Math.floor(1000 + Math.random() * 9000));
+}
+
+export function generateTempPassword(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.getRandomValues === 'function') {
+    const arr = new Uint32Array(1);
+    crypto.getRandomValues(arr);
+    return `RC${1000 + (arr[0] % 9000)}`;
+  }
+  return `RC${Math.floor(1000 + Math.random() * 9000)}`;
+}
+
+export interface PasswordStrengthResult {
+  isValid: boolean;
+  minLength: boolean;
+  hasUppercase: boolean;
+  hasLowercase: boolean;
+  hasNumber: boolean;
+  hasSymbol: boolean;
+  score: number;
+}
+
+export function validateStrongPassword(password: string): PasswordStrengthResult {
+  const val = password || '';
+  const minLength = val.length >= 8;
+  const hasUppercase = /[A-Z]/.test(val);
+  const hasLowercase = /[a-z]/.test(val);
+  const hasNumber = /[0-9]/.test(val);
+  const hasSymbol = /[^A-Za-z0-9\s]/.test(val);
+
+  const checks = [minLength, hasUppercase, hasLowercase, hasNumber, hasSymbol];
+  const score = checks.filter(Boolean).length;
+
+  return {
+    isValid: minLength && hasUppercase && hasLowercase && hasNumber && hasSymbol,
+    minLength,
+    hasUppercase,
+    hasLowercase,
+    hasNumber,
+    hasSymbol,
+    score,
+  };
+}
+
+function secureRandomIndex(max: number): number {
+  if (max <= 1) return 0;
+  if (typeof crypto !== 'undefined' && typeof crypto.getRandomValues === 'function') {
+    const arr = new Uint32Array(1);
+    const limit = Math.floor(0x100000000 / max) * max;
+    let rand = 0;
+    do {
+      crypto.getRandomValues(arr);
+      rand = arr[0];
+    } while (rand >= limit);
+    return rand % max;
+  }
+  return Math.floor(Math.random() * max);
+}
+
+export function generateStrongStaffPassword(length = 12): string {
+  const targetLen = Math.max(8, length);
+  const upper = 'ABCDEFGHJKLMNPQRSTUVWXYZ';
+  const lower = 'abcdefghijkmnopqrstuvwxyz';
+  const digits = '23456789';
+  const symbols = '!@#$%^&*-_+?';
+  const all = upper + lower + digits + symbols;
+
+  const chars: string[] = [
+    upper[secureRandomIndex(upper.length)],
+    lower[secureRandomIndex(lower.length)],
+    digits[secureRandomIndex(digits.length)],
+    symbols[secureRandomIndex(symbols.length)],
+  ];
+
+  while (chars.length < targetLen) {
+    chars.push(all[secureRandomIndex(all.length)]);
+  }
+
+  // Fisher-Yates shuffle with secure random indices
+  for (let i = chars.length - 1; i > 0; i--) {
+    const j = secureRandomIndex(i + 1);
+    const tmp = chars[i];
+    chars[i] = chars[j];
+    chars[j] = tmp;
+  }
+
+  return chars.join('');
+}
+
+export function resolveStaffRoleFromTitle(
+  roleTitle?: string | null
+): 'manager' | 'receptionist' | 'security' | 'cleaner' {
+  const norm = String(roleTitle || '')
+    .trim()
+    .toLowerCase();
+
+  if (
+    norm.includes('security') ||
+    norm.includes('qorovul') ||
+    norm.includes('qo‘riq') ||
+    norm.includes("qo'riq") ||
+    norm.includes('xavfsiz') ||
+    norm.includes('охран') ||
+    norm.includes('безопас')
+  ) {
+    return 'security';
+  }
+
+  if (
+    norm.includes('clean') ||
+    norm.includes('housekeep') ||
+    norm.includes('tozalik') ||
+    norm.includes('farrosh') ||
+    norm.includes('убор') ||
+    norm.includes('чистот')
+  ) {
+    return 'cleaner';
+  }
+
+  if (
+    norm.includes('reception') ||
+    norm.includes('qabul') ||
+    norm.includes('ресепш') ||
+    norm.includes('рецепц') ||
+    norm.includes('прием') ||
+    norm.includes('приём')
+  ) {
+    return 'receptionist';
+  }
+
+  // Administrator, Manager, Accountant, Director, or custom operational staff -> Staff dashboard ('manager')
+  return 'manager';
 }
