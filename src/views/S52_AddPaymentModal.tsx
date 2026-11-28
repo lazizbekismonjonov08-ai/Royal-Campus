@@ -3,7 +3,7 @@ import { useDorm } from '../context/DormContext';
 import { useI18n } from '../i18n/I18nContext';
 import {
   ACADEMIC_BILLING_MONTHS,
-  addDaysToDateStr,
+  addMonthsToDateStr,
   computeStudentBillingSummary,
   ensureDateTimeValue,
   findLinkedApplication,
@@ -12,10 +12,11 @@ import {
   getCurrentLocalDateTime,
   normalizeSelectableMethod,
   safeAmount,
-  toDateTimeLocalInputValue,
 } from '../utils/billingUtils';
 import { BILLING_PAYMENT_METHODS, BillingPaymentMethod } from '../types';
 import { PaymentExpiryBadge } from '../components/PaymentExpiryBadge';
+import { DatePickerDDMMYYYY } from '../components/DatePickerDDMMYYYY';
+import { PaymentDurationSelector } from '../components/PaymentDurationSelector';
 import {
   CreditCard,
   AlertTriangle,
@@ -99,9 +100,10 @@ export const S52_AddPaymentModal: React.FC<AddPaymentProps> = ({ initialStudentI
   const [periodMonth, setPeriodMonth] = useState<string>(() => getCurrentBillingPeriod());
   const [monthlyRateOverrideInput, setMonthlyRateOverrideInput] = useState<string>('');
   const [amount, setAmount] = useState<number>(0);
+  const [durationMonths, setDurationMonths] = useState<number>(1);
   const [paymentDate, setPaymentDate] = useState<string>(() => getCurrentLocalDateTime());
   const [paidUntilDate, setPaidUntilDate] = useState<string>(() =>
-    addDaysToDateStr(getCurrentLocalDateTime(), 30)
+    addMonthsToDateStr(getCurrentLocalDateTime(), 1)
   );
   const [paidUntilManual, setPaidUntilManual] = useState<boolean>(false);
   const [paymentMethod, setPaymentMethod] = useState<BillingPaymentMethod>('cash');
@@ -160,8 +162,9 @@ export const S52_AddPaymentModal: React.FC<AddPaymentProps> = ({ initialStudentI
     if (!selectedSummary) return;
     setFormError(null);
     const nowDt = getCurrentLocalDateTime();
+    setDurationMonths(1);
     setPaymentDate(nowDt);
-    setPaidUntilDate(addDaysToDateStr(nowDt, 30));
+    setPaidUntilDate(addMonthsToDateStr(nowDt, 1));
     setPaidUntilManual(false);
     setNotes('');
 
@@ -175,8 +178,21 @@ export const S52_AddPaymentModal: React.FC<AddPaymentProps> = ({ initialStudentI
   const handlePaymentDateChange = (nextDateTime: string) => {
     setPaymentDate(nextDateTime);
     if (!paidUntilManual && nextDateTime) {
-      setPaidUntilDate(addDaysToDateStr(nextDateTime, 30));
+      setPaidUntilDate(addMonthsToDateStr(nextDateTime, durationMonths));
     }
+  };
+
+  const handleDurationChange = (months: number) => {
+    setDurationMonths(months);
+    setPaidUntilDate(addMonthsToDateStr(paymentDate, months));
+    setPaidUntilManual(false);
+    const targetAmt =
+      months === 1
+        ? currentItemMetrics.remaining > 0
+          ? currentItemMetrics.remaining
+          : effectiveMonthlyRate
+        : effectiveMonthlyRate * months;
+    setAmount(targetAmt);
   };
 
   const handleOverrideChange = (valStr: string) => {
@@ -185,7 +201,11 @@ export const S52_AddPaymentModal: React.FC<AddPaymentProps> = ({ initialStudentI
     const nextRate = nextOv > 0 ? nextOv : selectedSummary?.monthlyRate ?? defaultRoomRate;
     const row = selectedSummary?.months.find((m) => m.period === periodMonth);
     const alreadyPaid = row ? row.paidAmount : 0;
-    setAmount(Math.max(0, nextRate - alreadyPaid));
+    if (durationMonths === 1) {
+      setAmount(Math.max(0, nextRate - alreadyPaid));
+    } else {
+      setAmount(nextRate * durationMonths);
+    }
   };
 
   const handleSubmit = (e: React.FormEvent) => {
@@ -203,7 +223,7 @@ export const S52_AddPaymentModal: React.FC<AddPaymentProps> = ({ initialStudentI
     const resolvedPaidUntil =
       paidUntilDate && /^\d{4}-\d{2}-\d{2}$/.test(paidUntilDate)
         ? paidUntilDate
-        : addDaysToDateStr(normalizedDateTime, 30);
+        : addMonthsToDateStr(normalizedDateTime, durationMonths);
 
     recordPayment({
       studentId,
@@ -413,7 +433,7 @@ export const S52_AddPaymentModal: React.FC<AddPaymentProps> = ({ initialStudentI
                 />
               </div>
 
-              {/* Payment Method & Exact Date + Time (HH:MM) */}
+              {/* Payment Method & Exact Date + 24-Hour Time (DD.MM.YYYY, HH:MM) */}
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
                   <label className="block font-bold text-slate-700 mb-1">
@@ -422,7 +442,7 @@ export const S52_AddPaymentModal: React.FC<AddPaymentProps> = ({ initialStudentI
                   <select
                     value={normalizeSelectableMethod(paymentMethod)}
                     onChange={(e) => setPaymentMethod(e.target.value as BillingPaymentMethod)}
-                    className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500 font-medium text-slate-800"
+                    className="w-full px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500 font-medium text-slate-800"
                   >
                     {BILLING_PAYMENT_METHODS.map((m) => (
                       <option key={m} value={m}>
@@ -434,20 +454,26 @@ export const S52_AddPaymentModal: React.FC<AddPaymentProps> = ({ initialStudentI
 
                 <div>
                   <label className="block font-bold text-slate-700 mb-1">
-                    {t('payments.dateLabel')}:
+                    {t('payments.dateLabel')} (DD.MM.YYYY, 24h):
                   </label>
-                  <input
-                    type="datetime-local"
-                    required
-                    value={toDateTimeLocalInputValue(paymentDate)}
-                    onChange={(e) => handlePaymentDateChange(e.target.value)}
-                    className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500 font-medium text-slate-800 tabular-nums"
+                  <DatePickerDDMMYYYY
+                    mode="datetime"
+                    value={paymentDate}
+                    onChange={handlePaymentDateChange}
                   />
                 </div>
               </div>
 
-              {/* Paid-Through / Coverage End Date (default = Payment Date + 30 days) */}
-              <div className="p-3 rounded-2xl bg-sky-50/70 border border-sky-200/80 space-y-2">
+              {/* Compact Duration Selector ("Necha oyga to'landi") directly below Payment Date */}
+              <PaymentDurationSelector
+                months={durationMonths}
+                monthlyRate={effectiveMonthlyRate}
+                onChange={handleDurationChange}
+                accent="emerald"
+              />
+
+              {/* Paid-Through / Coverage End Date (DD.MM.YYYY, auto-calculated from paymentDate + durationMonths) */}
+              <div className="px-3 py-2.5 rounded-2xl bg-sky-50/70 border border-sky-200/80 space-y-1.5">
                 <div className="flex items-center justify-between gap-2 flex-wrap">
                   <label className="font-bold text-slate-800 flex items-center gap-1.5">
                     <Calendar className="w-3.5 h-3.5 text-sky-600" />
@@ -455,29 +481,26 @@ export const S52_AddPaymentModal: React.FC<AddPaymentProps> = ({ initialStudentI
                   </label>
                   <PaymentExpiryBadge paidUntilDate={paidUntilDate} compact />
                 </div>
-                <div className="flex items-center gap-2">
-                  <input
-                    type="date"
-                    required
+                <div className="flex flex-wrap items-center gap-2">
+                  <DatePickerDDMMYYYY
+                    mode="date"
                     value={paidUntilDate}
-                    onChange={(e) => {
-                      setPaidUntilDate(e.target.value);
+                    onChange={(nextVal) => {
+                      setPaidUntilDate(nextVal);
                       setPaidUntilManual(true);
                     }}
-                    className="flex-1 px-3 py-2 bg-white border border-sky-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-sky-500 font-semibold text-slate-900 tabular-nums"
                   />
                   {paidUntilManual && (
                     <button
                       type="button"
                       onClick={() => {
-                        setPaidUntilDate(addDaysToDateStr(paymentDate, 30));
+                        setPaidUntilDate(addMonthsToDateStr(paymentDate, durationMonths));
                         setPaidUntilManual(false);
                       }}
-                      className="px-2.5 py-2 rounded-xl bg-white hover:bg-slate-100 border border-slate-200 text-slate-600 font-bold text-[10px] inline-flex items-center gap-1 cursor-pointer shrink-0"
-                      title="+30"
+                      className="px-2 py-1.5 rounded-lg bg-white hover:bg-slate-100 border border-slate-200 text-slate-600 font-bold text-[10px] inline-flex items-center gap-1 cursor-pointer shrink-0"
                     >
                       <RotateCcw className="w-3 h-3" />
-                      <span>+30</span>
+                      <span>{t('payments.resetAutoDate')}</span>
                     </button>
                   )}
                 </div>

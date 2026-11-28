@@ -100,37 +100,65 @@ export const I18nProvider: React.FC<{ children: React.ReactNode }> = ({ children
   );
 
   const formatDate = useCallback(
-    (dateVal: string | Date, options?: Intl.DateTimeFormatOptions): string => {
+    (dateVal: string | Date, _options?: Intl.DateTimeFormatOptions): string => {
       if (!dateVal) return '';
       try {
+        if (typeof dateVal === 'string') {
+          const trimmed = dateVal.trim();
+          const isoMatch = trimmed.match(/^(\d{4})-(\d{2})-(\d{2})/);
+          if (isoMatch) {
+            return `${isoMatch[3]}.${isoMatch[2]}.${isoMatch[1]}`;
+          }
+          const dmyMatch = trimmed.match(/^(\d{2})\.(\d{2})\.(\d{4})/);
+          if (dmyMatch) {
+            return `${dmyMatch[1]}.${dmyMatch[2]}.${dmyMatch[3]}`;
+          }
+        }
         const d = typeof dateVal === 'string' ? new Date(dateVal) : dateVal;
         if (isNaN(d.getTime())) return String(dateVal);
 
-        const locale = language === 'ru' ? 'ru-RU' : language === 'en' ? 'en-US' : 'uz-UZ';
-        const defaultOptions: Intl.DateTimeFormatOptions = options || {
-          year: 'numeric',
-          month: 'short',
-          day: 'numeric',
-        };
-        return new Intl.DateTimeFormat(locale, defaultOptions).format(d);
+        const dd = String(d.getDate()).padStart(2, '0');
+        const mm = String(d.getMonth() + 1).padStart(2, '0');
+        const yyyy = d.getFullYear();
+        return `${dd}.${mm}.${yyyy}`;
       } catch {
         return String(dateVal);
       }
     },
-    [language]
+    []
   );
 
   const formatDateTime = useCallback(
     (dateVal: string | Date): string => {
-      return formatDate(dateVal, {
-        year: 'numeric',
-        month: 'short',
-        day: 'numeric',
-        hour: '2-digit',
-        minute: '2-digit',
-      });
+      if (!dateVal) return '';
+      try {
+        if (typeof dateVal === 'string') {
+          const trimmed = dateVal.trim();
+          const isoDateTimeMatch = trimmed.match(
+            /^(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2}))?/
+          );
+          if (isoDateTimeMatch) {
+            const [, y, m, d, hh, mm] = isoDateTimeMatch;
+            if (hh && mm) {
+              return `${d}.${m}.${y}, ${hh}:${mm}`;
+            }
+            return `${d}.${m}.${y}`;
+          }
+        }
+        const d = typeof dateVal === 'string' ? new Date(dateVal) : dateVal;
+        if (isNaN(d.getTime())) return String(dateVal);
+
+        const dd = String(d.getDate()).padStart(2, '0');
+        const mm = String(d.getMonth() + 1).padStart(2, '0');
+        const yyyy = d.getFullYear();
+        const hh = String(d.getHours()).padStart(2, '0');
+        const min = String(d.getMinutes()).padStart(2, '0');
+        return `${dd}.${mm}.${yyyy}, ${hh}:${min}`;
+      } catch {
+        return String(dateVal);
+      }
     },
-    [formatDate]
+    []
   );
 
   const formatPercent = useCallback(

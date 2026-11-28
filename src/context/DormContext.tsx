@@ -44,6 +44,7 @@ import {
 import {
   ACADEMIC_BILLING_MONTHS,
   addDaysToDateStr,
+  addMonthsToDateStr,
   comparePaymentsChronoDesc,
   computePaymentExpiryInfo,
   computeStudentBillingSummary,
@@ -1045,9 +1046,13 @@ export const DormProvider: React.FC<{ children: React.ReactNode }> = ({ children
     const billingNotesForSync = initialBilling?.notes?.trim() || undefined;
     const targetPeriodForSync = initialBilling?.initialPeriod || getCurrentBillingPeriod();
     const rawMonthStatusForSync = initialBilling?.monthStatus || 'pending';
+    const durationMonthsForSync = Math.max(1, Number(initialBilling?.durationMonths) || 1);
+    const expectedTotalForSync = preResolvedTariff * durationMonthsForSync;
     const monthPaidAmountForSync =
       rawMonthStatusForSync === 'paid'
-        ? preResolvedTariff
+        ? safeAmount(initialBilling?.monthAmount) > 0
+          ? safeAmount(initialBilling?.monthAmount)
+          : expectedTotalForSync
         : rawMonthStatusForSync === 'partial'
         ? safeAmount(initialBilling?.monthAmount)
         : 0;
@@ -1055,7 +1060,7 @@ export const DormProvider: React.FC<{ children: React.ReactNode }> = ({ children
       monthPaidAmountForSync > 0
         ? isValidIsoDate(initialBilling?.paidUntil)
           ? initialBilling!.paidUntil!.trim()
-          : addDaysToDateStr(billingDateTimeForSync, 30)
+          : addMonthsToDateStr(billingDateTimeForSync, durationMonthsForSync)
         : '';
 
     const initialPaymentId = `PAY-${Date.now() + 1}-MO`;
@@ -1076,7 +1081,7 @@ export const DormProvider: React.FC<{ children: React.ReactNode }> = ({ children
               paidUntil: resolvedPaidUntilForSync || undefined,
               type: 'income',
               periodMonth: targetPeriodForSync,
-              itemRemainingAfter: Math.max(0, preResolvedTariff - monthPaidAmountForSync),
+              itemRemainingAfter: Math.max(0, expectedTotalForSync - monthPaidAmountForSync),
               paymentMethod: billingMethodForSync,
               recordedBy: currentUserName,
               status: 'completed',
@@ -1181,9 +1186,13 @@ export const DormProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
       const targetPeriod = targetPeriodForSync;
       const rawMonthStatus = rawMonthStatusForSync;
+      const durationMonths = Math.max(1, Number(initialBilling?.durationMonths) || 1);
+      const expectedTotalForDuration = resolvedTariff * durationMonths;
       const monthPaidAmount =
         rawMonthStatus === 'paid'
-          ? resolvedTariff
+          ? safeAmount(initialBilling?.monthAmount) > 0
+            ? safeAmount(initialBilling?.monthAmount)
+            : expectedTotalForDuration
           : rawMonthStatus === 'partial'
           ? safeAmount(initialBilling?.monthAmount)
           : 0;
@@ -1191,7 +1200,7 @@ export const DormProvider: React.FC<{ children: React.ReactNode }> = ({ children
         monthPaidAmount > 0
           ? isValidIsoDate(initialBilling?.paidUntil)
             ? initialBilling!.paidUntil!.trim()
-            : addDaysToDateStr(billingDateTime, 30)
+            : addMonthsToDateStr(billingDateTime, durationMonths)
           : undefined;
 
       const monthsMap: Record<string, MonthlyBillingEntry> = {};
@@ -1983,16 +1992,20 @@ export const DormProvider: React.FC<{ children: React.ReactNode }> = ({ children
       const targetPeriod = initialBilling.initialPeriod || getCurrentBillingPeriod();
       replacedPeriodForSync = targetPeriod;
       const rawMonthStatus = initialBilling.monthStatus || 'pending';
+      const durationMonthsForSync = Math.max(1, Number(initialBilling.durationMonths) || 1);
+      const expectedTotalForSync = computedMonthlyTariffForSync * durationMonthsForSync;
       const monthPaid =
         rawMonthStatus === 'paid'
-          ? computedMonthlyTariffForSync
+          ? safeAmount(initialBilling.monthAmount) > 0
+            ? safeAmount(initialBilling.monthAmount)
+            : expectedTotalForSync
           : rawMonthStatus === 'partial'
           ? safeAmount(initialBilling.monthAmount)
           : 0;
       if (monthPaid > 0) {
         resolvedPaidUntilForSync = isValidIsoDate(initialBilling.paidUntil)
           ? initialBilling.paidUntil!.trim()
-          : addDaysToDateStr(billingDateTime, 30);
+          : addMonthsToDateStr(billingDateTime, durationMonthsForSync);
         initialPaymentsForSync.push({
           id: assignPaymentId,
           studentId: targetStudent.id,
@@ -2007,7 +2020,7 @@ export const DormProvider: React.FC<{ children: React.ReactNode }> = ({ children
           paidUntil: resolvedPaidUntilForSync,
           type: 'income',
           periodMonth: targetPeriod,
-          itemRemainingAfter: Math.max(0, computedMonthlyTariffForSync - monthPaid),
+          itemRemainingAfter: Math.max(0, expectedTotalForSync - monthPaid),
           paymentMethod: billingMethod,
           recordedBy: currentUserName,
           status: 'completed',
@@ -2144,9 +2157,13 @@ export const DormProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
         const targetPeriod = initialBilling.initialPeriod || getCurrentBillingPeriod();
         const rawMonthStatus = initialBilling.monthStatus || 'pending';
+        const durationMonths = Math.max(1, Number(initialBilling.durationMonths) || 1);
+        const expectedTotalForDuration = computedMonthlyTariff * durationMonths;
         const monthPaid =
           rawMonthStatus === 'paid'
-            ? computedMonthlyTariff
+            ? safeAmount(initialBilling.monthAmount) > 0
+              ? safeAmount(initialBilling.monthAmount)
+              : expectedTotalForDuration
             : rawMonthStatus === 'partial'
             ? safeAmount(initialBilling.monthAmount)
             : 0;
@@ -2154,7 +2171,7 @@ export const DormProvider: React.FC<{ children: React.ReactNode }> = ({ children
           monthPaid > 0
             ? isValidIsoDate(initialBilling.paidUntil)
               ? initialBilling.paidUntil!.trim()
-              : addDaysToDateStr(billingDateTime, 30)
+              : addMonthsToDateStr(billingDateTime, durationMonths)
             : undefined;
 
         const monthsMap: Record<string, MonthlyBillingEntry> = {};

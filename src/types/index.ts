@@ -174,6 +174,7 @@ export interface InitialBillingSetup {
   initialPeriod: string;
   monthStatus: 'pending' | 'paid' | 'partial';
   monthAmount: number;
+  durationMonths?: number;
   paymentMethod: BillingPaymentMethod;
   paymentDate: string; // YYYY-MM-DDTHH:mm or YYYY-MM-DD
   paidUntil?: string; // YYYY-MM-DD

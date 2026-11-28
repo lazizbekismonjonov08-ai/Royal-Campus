@@ -178,6 +178,41 @@ export function addDaysToDateStr(dateOrDateTimeStr?: string, days = 30): string 
   return `${target.getFullYear()}-${pad2(target.getMonth() + 1)}-${pad2(target.getDate())}`;
 }
 
+export const DURATION_MONTH_OPTIONS = [1, 2, 3, 6, 12] as const;
+
+/**
+ * Adds a whole number of calendar months to a YYYY-MM-DD or YYYY-MM-DDTHH:mm string
+ * using local date arithmetic with month-end clamping (e.g. 31.01.2026 + 1 mo -> 28.02.2026,
+ * 09.09.2026 + 1 mo -> 09.10.2026, 09.09.2026 + 3 mo -> 09.12.2026).
+ */
+export function addMonthsToDateStr(dateOrDateTimeStr?: string, months = 1): string {
+  const datePart = extractDatePart(dateOrDateTimeStr) || getCurrentLocalDateStr();
+  const match = datePart.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) return '';
+  const year = Number(match[1]);
+  const month = Number(match[2]); // 1-12
+  const day = Number(match[3]);
+  const safeMonths = Math.max(1, Math.round(Number(months) || 1));
+
+  const totalMonths = (month - 1) + safeMonths;
+  const targetYear = year + Math.floor(totalMonths / 12);
+  const targetMonthIndex = ((totalMonths % 12) + 12) % 12; // 0-11
+  const lastDayOfTargetMonth = new Date(targetYear, targetMonthIndex + 1, 0).getDate();
+  const clampedDay = Math.min(day, lastDayOfTargetMonth);
+
+  return `${targetYear}-${pad2(targetMonthIndex + 1)}-${pad2(clampedDay)}`;
+}
+
+export function getLocalizedMonthShortNames(lang: Language): string[] {
+  if (lang === 'ru') {
+    return ['Янв', 'Фев', 'Мар', 'Апр', 'Май', 'Июн', 'Июл', 'Авг', 'Сен', 'Окт', 'Ноя', 'Дек'];
+  }
+  if (lang === 'en') {
+    return ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  }
+  return ['Yan', 'Fev', 'Mar', 'Apr', 'May', 'Iyn', 'Iyl', 'Avg', 'Sen', 'Okt', 'Noy', 'Dek'];
+}
+
 export function formatShortDateDisplay(val?: string, emptyFallback = '—'): string {
   if (!val || !val.trim()) return emptyFallback;
   const datePart = extractDatePart(val);

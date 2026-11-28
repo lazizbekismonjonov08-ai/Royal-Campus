@@ -9,7 +9,7 @@ import { useDorm } from '../context/DormContext';
 import { useI18n } from '../i18n/I18nContext';
 import {
   ACADEMIC_BILLING_MONTHS,
-  addDaysToDateStr,
+  addMonthsToDateStr,
   computeStudentBillingSummary,
   ensureDateTimeValue,
   findLinkedApplication,
@@ -17,9 +17,9 @@ import {
   getCurrentLocalDateTime,
   normalizeSelectableMethod,
   safeAmount,
-  toDateTimeLocalInputValue,
 } from '../utils/billingUtils';
 import { PaymentExpiryBadge } from '../components/PaymentExpiryBadge';
+import { DatePickerDDMMYYYY } from '../components/DatePickerDDMMYYYY';
 import { ModalHeader } from '../components/ModalHeader';
 import { useModalDismiss } from '../hooks/useModalDismiss';
 import { CreditCard, Save, CheckCircle2, Clock, AlertTriangle } from 'lucide-react';
@@ -157,7 +157,7 @@ export const S53_BillingEditorModal: React.FC<BillingEditorModalProps> = ({
       const nextPaidUntil =
         status === 'pending'
           ? undefined
-          : existing.paidUntil || (nextPaymentDate ? addDaysToDateStr(nextPaymentDate, 30) : undefined);
+          : existing.paidUntil || (nextPaymentDate ? addMonthsToDateStr(nextPaymentDate, 1) : undefined);
 
       return {
         ...prev,
@@ -184,7 +184,7 @@ export const S53_BillingEditorModal: React.FC<BillingEditorModalProps> = ({
         num > 0 ? existing.paymentDate || getCurrentLocalDateTime() : existing.paymentDate;
       const nextPaidUntil =
         num > 0
-          ? existing.paidUntil || (nextPaymentDate ? addDaysToDateStr(nextPaymentDate, 30) : undefined)
+          ? existing.paidUntil || (nextPaymentDate ? addMonthsToDateStr(nextPaymentDate, 1) : undefined)
           : undefined;
       return {
         ...prev,
@@ -215,7 +215,7 @@ export const S53_BillingEditorModal: React.FC<BillingEditorModalProps> = ({
             ...existing,
             paymentDate: nextDt,
             paidUntil: nextDt
-              ? existing.paidUntil || addDaysToDateStr(nextDt, 30)
+              ? existing.paidUntil || addMonthsToDateStr(nextDt, 1)
               : existing.paidUntil,
           },
         };
@@ -475,24 +475,26 @@ export const S53_BillingEditorModal: React.FC<BillingEditorModalProps> = ({
                           </td>
 
                           <td className="p-2.5">
-                            <input
-                              type="datetime-local"
-                              value={toDateTimeLocalInputValue(entry.paymentDate)}
-                              onChange={(e) =>
-                                handleMonthFieldChange(mMeta.period, 'paymentDate', e.target.value)
+                            <DatePickerDDMMYYYY
+                              mode="datetime"
+                              compact
+                              allowEmpty
+                              value={entry.paymentDate || ''}
+                              onChange={(nextVal) =>
+                                handleMonthFieldChange(mMeta.period, 'paymentDate', nextVal)
                               }
-                              className="px-2 py-1 bg-slate-50 border border-slate-200 rounded-lg text-slate-800 tabular-nums"
                             />
                           </td>
 
                           <td className="p-2.5">
-                            <input
-                              type="date"
+                            <DatePickerDDMMYYYY
+                              mode="date"
+                              compact
+                              allowEmpty
                               value={entry.paidUntil || ''}
-                              onChange={(e) =>
-                                handleMonthFieldChange(mMeta.period, 'paidUntil', e.target.value)
+                              onChange={(nextVal) =>
+                                handleMonthFieldChange(mMeta.period, 'paidUntil', nextVal)
                               }
-                              className="px-2 py-1 bg-slate-50 border border-slate-200 rounded-lg text-slate-800 tabular-nums"
                             />
                           </td>
 

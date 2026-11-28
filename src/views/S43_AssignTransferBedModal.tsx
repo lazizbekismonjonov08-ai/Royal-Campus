@@ -25,10 +25,13 @@ import {
   Copy,
   KeyRound,
   CreditCard,
+  Calendar,
 } from 'lucide-react';
 import { ModalHeader } from '../components/ModalHeader';
 import { useModalDismiss } from '../hooks/useModalDismiss';
 import { PaymentExpiryBadge } from '../components/PaymentExpiryBadge';
+import { DatePickerDDMMYYYY } from '../components/DatePickerDDMMYYYY';
+import { PaymentDurationSelector } from '../components/PaymentDurationSelector';
 import {
   Room,
   Bed,
@@ -42,13 +45,12 @@ import {
 } from '../types';
 import {
   ACADEMIC_BILLING_MONTHS,
-  addDaysToDateStr,
+  addMonthsToDateStr,
   ensureDateTimeValue,
   getCurrentBillingPeriod,
   getCurrentLocalDateTime,
   normalizeSelectableMethod,
   safeAmount,
-  toDateTimeLocalInputValue,
 } from '../utils/billingUtils';
 
 interface AssignModalProps {
@@ -109,10 +111,11 @@ export const S43_AssignTransferBedModal: React.FC<AssignModalProps> = ({
   const [initialPeriod, setInitialPeriod] = useState<string>(() => getCurrentBillingPeriod());
   const [monthStatus, setMonthStatus] = useState<'pending' | 'paid' | 'partial'>('pending');
   const [monthPartialInput, setMonthPartialInput] = useState<string>('');
+  const [durationMonths, setDurationMonths] = useState<number>(1);
   const [paymentMethod, setPaymentMethod] = useState<BillingPaymentMethod>('cash');
   const [paymentDate, setPaymentDate] = useState<string>(() => getCurrentLocalDateTime());
   const [paidUntilDate, setPaidUntilDate] = useState<string>(() =>
-    addDaysToDateStr(getCurrentLocalDateTime(), 30)
+    addMonthsToDateStr(getCurrentLocalDateTime(), 1)
   );
   const [paidUntilManual, setPaidUntilManual] = useState<boolean>(false);
   const [paymentNotes, setPaymentNotes] = useState<string>('');
@@ -406,11 +409,12 @@ export const S43_AssignTransferBedModal: React.FC<AssignModalProps> = ({
   const parsedOverride =
     monthlyRateOverrideInput.trim() !== '' ? safeAmount(monthlyRateOverrideInput, 0) : 0;
   const effectiveMonthlyRate = parsedOverride > 0 ? parsedOverride : defaultRoomTariff;
+  const expectedTotalForDuration = effectiveMonthlyRate * durationMonths;
   const monthPaidPreview =
     monthStatus === 'paid'
-      ? effectiveMonthlyRate
+      ? expectedTotalForDuration
       : monthStatus === 'partial'
-      ? Math.min(effectiveMonthlyRate, safeAmount(monthPartialInput, 0))
+      ? Math.min(expectedTotalForDuration, safeAmount(monthPartialInput, 0))
       : 0;
 
   // Final confirmation
@@ -429,7 +433,7 @@ export const S43_AssignTransferBedModal: React.FC<AssignModalProps> = ({
 
     if (monthStatus === 'partial') {
       const mVal = safeAmount(monthPartialInput, 0);
-      if (mVal <= 0 || mVal > effectiveMonthlyRate) {
+      if (mVal <= 0 || mVal > expectedTotalForDuration) {
         setBillingValidationError(t('students.modal.errPartialAmount'));
         return;
       }
@@ -440,7 +444,7 @@ export const S43_AssignTransferBedModal: React.FC<AssignModalProps> = ({
       monthStatus !== 'pending'
         ? paidUntilDate && /^\d{4}-\d{2}-\d{2}$/.test(paidUntilDate)
           ? paidUntilDate
-          : addDaysToDateStr(normalizedDateTime, 30)
+          : addMonthsToDateStr(normalizedDateTime, durationMonths)
         : undefined;
 
     const initialBilling: InitialBillingSetup = {
@@ -448,6 +452,7 @@ export const S43_AssignTransferBedModal: React.FC<AssignModalProps> = ({
       initialPeriod,
       monthStatus,
       monthAmount: monthPaidPreview,
+      durationMonths,
       paymentMethod,
       paymentDate: normalizedDateTime,
       paidUntil: resolvedPaidUntil,
@@ -1621,7 +1626,7 @@ export const S43_AssignTransferBedModal: React.FC<AssignModalProps> = ({
                             </div>
                             <div>
                               <label className="block text-[10px] font-bold text-slate-600 mb-1">
-                                {t('students.modal.initialMonthLabel')} ({formatCurrency(effectiveMonthlyRate)})
+                                {t('students.modal.initialMonthLabel')} ({formatCurrency(expectedTotalForDuration)})
                               </label>
                               <div className="flex items-center gap-1">
                                 {(['pending', 'paid', 'partial'] as const).map((st) => (
@@ -1633,7 +1638,7 @@ export const S43_AssignTransferBedModal: React.FC<AssignModalProps> = ({
                                       setBillingValidationError(null);
                                       if (st === 'partial' && !monthPartialInput) {
                                         setMonthPartialInput(
-                                          String(Math.round(effectiveMonthlyRate / 2))
+                                          String(Math.round(expectedTotalForDuration / 2))
                                         );
                                       }
                                     }}
@@ -1662,11 +1667,11 @@ export const S43_AssignTransferBedModal: React.FC<AssignModalProps> = ({
                               <input
                                 type="number"
                                 min={1}
-                                max={effectiveMonthlyRate}
+                                max={expectedTotalForDuration}
                                 step={50000}
                                 value={monthPartialInput}
                                 onChange={(e) => setMonthPartialInput(e.target.value)}
-                                placeholder={String(Math.round(effectiveMonthlyRate / 2))}
+                                placeholder={String(Math.round(expectedTotalForDuration / 2))}
                                 className="w-full px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-xs font-bold text-slate-900 tabular-nums"
                               />
                             </div>
@@ -1674,8 +1679,8 @@ export const S43_AssignTransferBedModal: React.FC<AssignModalProps> = ({
                         </div>
 
                         {monthStatus !== 'pending' && (
-                          <div className="space-y-2.5">
-                            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+                          <div className="space-y-2">
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
                               <div>
                                 <label className="block text-[10px] font-bold text-slate-600 mb-1">
                                   {t('payments.methodLabel')}
@@ -1694,43 +1699,70 @@ export const S43_AssignTransferBedModal: React.FC<AssignModalProps> = ({
                                   ))}
                                 </select>
                               </div>
+
                               <div>
                                 <label className="block text-[10px] font-bold text-slate-600 mb-1">
-                                  {t('payments.dateLabel')}
+                                  {t('payments.dateLabel')} (DD.MM.YYYY, 24h)
                                 </label>
-                                <input
-                                  type="datetime-local"
-                                  value={toDateTimeLocalInputValue(paymentDate)}
-                                  onChange={(e) => {
-                                    setPaymentDate(e.target.value);
-                                    if (!paidUntilManual && e.target.value) {
-                                      setPaidUntilDate(addDaysToDateStr(e.target.value, 30));
+                                <DatePickerDDMMYYYY
+                                  mode="datetime"
+                                  value={paymentDate}
+                                  onChange={(nextVal) => {
+                                    setPaymentDate(nextVal);
+                                    if (!paidUntilManual && nextVal) {
+                                      setPaidUntilDate(addMonthsToDateStr(nextVal, durationMonths));
                                     }
                                   }}
-                                  className="w-full px-2.5 py-1.5 bg-white border border-slate-200 rounded-lg text-xs text-slate-800 tabular-nums"
-                                />
-                              </div>
-                              <div>
-                                <label className="block text-[10px] font-bold text-slate-600 mb-1">
-                                  {t('payments.paidUntilLabel')}
-                                </label>
-                                <input
-                                  type="date"
-                                  value={paidUntilDate}
-                                  onChange={(e) => {
-                                    setPaidUntilDate(e.target.value);
-                                    setPaidUntilManual(true);
-                                  }}
-                                  className="w-full px-2.5 py-1.5 bg-white border border-slate-200 rounded-lg text-xs text-slate-800 tabular-nums"
                                 />
                               </div>
                             </div>
 
-                            <div className="flex items-center justify-between gap-2 flex-wrap">
-                              <span className="text-[10px] text-slate-500">
-                                {t('payments.paidUntilAutoHint')}
-                              </span>
-                              <PaymentExpiryBadge paidUntilDate={paidUntilDate} compact />
+                            {/* Compact Duration Selector directly below Payment Date */}
+                            <PaymentDurationSelector
+                              months={durationMonths}
+                              monthlyRate={effectiveMonthlyRate}
+                              onChange={(months) => {
+                                setDurationMonths(months);
+                                setPaidUntilDate(addMonthsToDateStr(paymentDate, months));
+                                setPaidUntilManual(false);
+                              }}
+                            />
+
+                            {/* Auto-calculated Paid-Through / Expiration Date (DD.MM.YYYY) */}
+                            <div className="px-3 py-2 rounded-xl bg-sky-50/70 border border-sky-200/80 space-y-1.5">
+                              <div className="flex items-center justify-between gap-2 flex-wrap">
+                                <label className="text-[10px] font-bold text-slate-700 flex items-center gap-1">
+                                  <Calendar className="w-3 h-3 text-sky-600" />
+                                  <span>{t('payments.paidUntilLabel')}</span>
+                                </label>
+                                <PaymentExpiryBadge paidUntilDate={paidUntilDate} compact />
+                              </div>
+                              <div className="flex flex-wrap items-center gap-2">
+                                <DatePickerDDMMYYYY
+                                  mode="date"
+                                  value={paidUntilDate}
+                                  onChange={(nextVal) => {
+                                    setPaidUntilDate(nextVal);
+                                    setPaidUntilManual(true);
+                                  }}
+                                />
+                                {paidUntilManual && (
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      setPaidUntilDate(addMonthsToDateStr(paymentDate, durationMonths));
+                                      setPaidUntilManual(false);
+                                    }}
+                                    className="px-2 py-1.5 rounded-lg bg-white hover:bg-slate-100 border border-slate-200 text-slate-700 font-bold text-[10px] inline-flex items-center gap-1 cursor-pointer shrink-0"
+                                  >
+                                    <RotateCcw className="w-3 h-3" />
+                                    <span>{t('payments.resetAutoDate')}</span>
+                                  </button>
+                                )}
+                                <span className="text-[10px] text-slate-500">
+                                  {t('payments.paidUntilAutoHint')}
+                                </span>
+                              </div>
                             </div>
 
                             <div>
@@ -1763,7 +1795,7 @@ export const S43_AssignTransferBedModal: React.FC<AssignModalProps> = ({
                                   0,
                                   (initialPeriod <= getCurrentBillingPeriod() ||
                                   monthStatus !== 'pending'
-                                    ? effectiveMonthlyRate
+                                    ? expectedTotalForDuration
                                     : 0) - monthPaidPreview
                                 )
                               )}
