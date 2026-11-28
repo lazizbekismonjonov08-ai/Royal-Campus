@@ -16,7 +16,7 @@ function maintenanceAiDevPlugin() {
           req.on('end', async () => {
             try {
               const body = bodyStr ? JSON.parse(bodyStr) : {};
-              const { analyzeMaintenanceLogsWithGemini } = await import('./src/server/maintenanceAiService');
+              const { analyzeMaintenanceLogsWithGemini } = await import('./src/server/maintenanceAiService.ts');
               const result = await analyzeMaintenanceLogsWithGemini(
                 body.issues || [],
                 body.rooms || [],
@@ -44,7 +44,7 @@ export default defineConfig(() => {
     plugins: [react(), tailwindcss(), maintenanceAiDevPlugin()],
     resolve: {
       alias: {
-        '@': path.resolve(__dirname, '.'),
+        '@': path.resolve(import.meta.dirname, '.'),
       },
     },
     server: {

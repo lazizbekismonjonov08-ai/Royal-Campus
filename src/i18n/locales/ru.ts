@@ -280,6 +280,11 @@ export const ru: TranslationDictionary = {
   'students.awaitingDesc': 'Резиденты, одобренные к проживанию, которым ещё не назначена комната и место',
   'students.searchSummary': 'По запросу «{query}» найдено результатов: {count} (совпадения выделены жёлтым)',
   'students.searchNoResults': 'По запросу «{query}» резиденты не найдены',
+  'students.cabinetCredentials': 'Данные для входа в кабинет резидента',
+  'students.resetPassword': 'Сбросить пароль',
+  'students.generatePassword': 'Создать пароль',
+  'students.passwordResetToast': 'Новый временный пароль создан: {password}',
+  'students.passwordNotSet': 'Пароль не задан',
 
   // Add / Edit Student Modal
   'students.modal.addTitle': 'Добавить нового резидента',

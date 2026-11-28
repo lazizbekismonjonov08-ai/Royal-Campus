@@ -1,7 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { useDorm } from '../context/DormContext';
 import { useI18n } from '../i18n/I18nContext';
-import { Role, Student } from '../types';
+import { Role, StaffUser } from '../types';
+import { SessionKind } from '../utils/sessionStorage';
 import {
   ArrowRight,
   UserCheck,
@@ -14,14 +15,22 @@ import {
 import { BrandLogo } from '../components/BrandLogo';
 import {
   verifyPasswordHash,
-  normalizePhoneKey,
   resolveStaffRoleFromTitle,
 } from '../utils/authCrypto';
-import { verifyStaffLoginWithSupabase } from '../services/supabaseSync';
+import {
+  verifyResidentLoginWithSupabase,
+  verifyStaffLoginWithSupabase,
+} from '../services/supabaseSync';
+
+export interface LoginSuccessMeta {
+  sessionKind: SessionKind;
+  studentId?: string;
+  staffUser?: StaffUser | null;
+}
 
 interface LoginProps {
   portalMode?: 'student' | 'staff';
-  onLoginSuccess: (selectedRole: Role) => void;
+  onLoginSuccess: (selectedRole: Role, meta?: LoginSuccessMeta) => void;
   onGoToPublicApp: () => void;
   onGoToLanding?: () => void;
 }
@@ -48,6 +57,8 @@ export const S01_Login: React.FC<LoginProps> = ({
     staffUsers,
     findUserAccountByIdentifier,
     ensureStudentForIdentifier,
+    syncLoggedInResidentToState,
+    refreshFromSupabase,
   } = useDorm();
   const { t } = useI18n();
 
@@ -75,7 +86,8 @@ export const S01_Login: React.FC<LoginProps> = ({
     setSignInError(null);
 
     const trimmedId = identifier.trim();
-    if (!trimmedId || !password) {
+    const trimmedPassword = password.trim();
+    if (!trimmedId || !trimmedPassword) {
       setSignInError(t('login.errInvalidCredentials'));
       return;
     }
@@ -90,7 +102,7 @@ export const S01_Login: React.FC<LoginProps> = ({
         if (loweredId === 'owner' || loweredId === 'admin') {
           setActiveStaffUser(null);
           setRole('owner');
-          onLoginSuccess('owner');
+          onLoginSuccess('owner', { sessionKind: 'owner' });
           return;
         }
 
@@ -100,7 +112,10 @@ export const S01_Login: React.FC<LoginProps> = ({
           const resolvedRole = resolveStaffRoleFromTitle(staffAuth.staffUser.roleTitle);
           setActiveStaffUser(staffAuth.staffUser);
           setRole(resolvedRole);
-          onLoginSuccess(resolvedRole);
+          onLoginSuccess(resolvedRole, {
+            sessionKind: 'staff',
+            staffUser: staffAuth.staffUser,
+          });
           return;
         }
         if (staffAuth.status === 'inactive') {
@@ -112,10 +127,34 @@ export const S01_Login: React.FC<LoginProps> = ({
           return;
         }
 
-        // 3. Resident Authentication (saved local credentials / temp password or linked application/resident)
+        // 3. Direct Resident Authentication against Supabase `residents` table
+        // (normalizes +998/spaces/dashes/parentheses and matches last 9 digits + trimmed password)
+        const residentAuth = await verifyResidentLoginWithSupabase(
+          trimmedId,
+          trimmedPassword,
+          students
+        );
+        if (residentAuth.status === 'ok') {
+          syncLoggedInResidentToState(residentAuth.resident);
+          setActiveStaffUser(null);
+          setActiveStudentId(residentAuth.resident.id);
+          setRole('student');
+          onLoginSuccess('student', {
+            sessionKind: 'resident',
+            studentId: residentAuth.resident.id,
+          });
+          void refreshFromSupabase();
+          return;
+        }
+        if (residentAuth.status === 'invalid_password') {
+          setSignInError(t('login.errInvalidCredentials'));
+          return;
+        }
+
+        // Fallback for resident accounts with locally hashed password when DB password is not yet set
         if (matchedAccount && matchedAccount.role === 'student') {
           const isMatch = await verifyPasswordHash(
-            password,
+            trimmedPassword,
             matchedAccount.passwordSalt,
             matchedAccount.passwordHash
           );
@@ -124,43 +163,23 @@ export const S01_Login: React.FC<LoginProps> = ({
             return;
           }
           setActiveStaffUser(null);
-          if (matchedAccount.studentId) {
-            setActiveStudentId(matchedAccount.studentId);
+          let resolvedResidentId: string | undefined;
+          if (residentAuth.status === 'no_password') {
+            syncLoggedInResidentToState(residentAuth.resident);
+            resolvedResidentId = residentAuth.resident.id;
+            setActiveStudentId(resolvedResidentId);
+          } else if (matchedAccount.studentId) {
+            resolvedResidentId = matchedAccount.studentId;
+            setActiveStudentId(resolvedResidentId);
           } else {
-            ensureStudentForIdentifier(trimmedId);
+            resolvedResidentId = ensureStudentForIdentifier(trimmedId);
           }
           setRole('student');
-          onLoginSuccess('student');
-          return;
-        }
-
-        // Match resident record loaded from Supabase / local state by phone, passport, or Application ID
-        const phoneKey = normalizePhoneKey(trimmedId);
-        const matchedStudent = students.find(
-          (s: Student) =>
-            s.status !== 'deleted_pending_purge' &&
-            ((phoneKey.length >= 7 && normalizePhoneKey(s.phone) === phoneKey) ||
-              s.passportNumber.trim().toLowerCase() === loweredId ||
-              (s.applicationId && s.applicationId.trim().toLowerCase() === loweredId))
-        );
-        if (matchedStudent) {
-          if (matchedStudent.tempPassword && password !== matchedStudent.tempPassword) {
-            setSignInError(t('login.errInvalidCredentials'));
-            return;
-          }
-          setActiveStaffUser(null);
-          setActiveStudentId(matchedStudent.id);
-          setRole('student');
-          onLoginSuccess('student');
-          return;
-        }
-
-        // Match submitted application record by phone, passport, or RC-2026-XXXX ID
-        const linkedStdId = ensureStudentForIdentifier(trimmedId);
-        if (linkedStdId) {
-          setActiveStaffUser(null);
-          setRole('student');
-          onLoginSuccess('student');
+          onLoginSuccess('student', {
+            sessionKind: 'resident',
+            studentId: resolvedResidentId,
+          });
+          void refreshFromSupabase();
           return;
         }
 
@@ -175,7 +194,10 @@ export const S01_Login: React.FC<LoginProps> = ({
           const resolvedRole = resolveStaffRoleFromTitle(staffAuth.staffUser.roleTitle);
           setActiveStaffUser(staffAuth.staffUser);
           setRole(resolvedRole);
-          onLoginSuccess(resolvedRole);
+          onLoginSuccess(resolvedRole, {
+            sessionKind: 'staff',
+            staffUser: staffAuth.staffUser,
+          });
           return;
         }
         if (staffAuth.status === 'inactive') {
@@ -202,7 +224,7 @@ export const S01_Login: React.FC<LoginProps> = ({
 
       setActiveStaffUser(null);
       setRole(selectedStaffRole);
-      onLoginSuccess(selectedStaffRole);
+      onLoginSuccess(selectedStaffRole, { sessionKind: 'owner' });
     } finally {
       setIsSubmittingSignIn(false);
     }

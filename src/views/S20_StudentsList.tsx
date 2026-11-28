@@ -15,6 +15,10 @@ import {
   ChevronRight,
   X,
   Trash2,
+  KeyRound,
+  Copy,
+  Check,
+  RefreshCw,
 } from 'lucide-react';
 import { Student } from '../types';
 import { HighlightText } from '../components/HighlightText';
@@ -49,6 +53,7 @@ export const S20_StudentsList: React.FC<StudentsListProps> = ({
     payments,
     role,
     deleteStudent,
+    resetResidentTempPassword,
   } = useDorm();
   const { t, formatCurrency, formatDate } = useI18n();
   const [search, setSearch] = useState('');
@@ -59,7 +64,35 @@ export const S20_StudentsList: React.FC<StudentsListProps> = ({
   const [currentPage, setCurrentPage] = useState(1);
   const [confirmDeleteStudent, setConfirmDeleteStudent] = useState<Student | null>(null);
   const [deleteToast, setDeleteToast] = useState<string | null>(null);
+  const [copiedKey, setCopiedKey] = useState<string | null>(null);
+  const [resettingId, setResettingId] = useState<string | null>(null);
   const ITEMS_PER_PAGE = 10;
+  const canManageCredentials = role !== 'security' && role !== 'student';
+
+  const handleCopyPassword = (value: string, key: string) => {
+    if (!value) return;
+    if (navigator.clipboard?.writeText) {
+      void navigator.clipboard.writeText(value);
+    }
+    setCopiedKey(key);
+    window.setTimeout(() => {
+      setCopiedKey((prev) => (prev === key ? null : prev));
+    }, 1800);
+  };
+
+  const handleResetPassword = async (std: Student) => {
+    if (!canManageCredentials || resettingId === std.id) return;
+    setResettingId(std.id);
+    try {
+      const res = await resetResidentTempPassword(std.id);
+      if (res.success && res.tempPassword) {
+        setDeleteToast(`${std.fullName} — ${t('students.passwordResetToast', { password: res.tempPassword })}`);
+        window.setTimeout(() => setDeleteToast(null), 4500);
+      }
+    } finally {
+      setResettingId(null);
+    }
+  };
 
   // 1. Eligible approved students awaiting bed assignment
   const unassignedStudents = useMemo(() => {
@@ -282,7 +315,40 @@ export const S20_StudentsList: React.FC<StudentsListProps> = ({
                       </div>
                     </td>
                     <td className="p-3.5 font-mono text-[11px]">
-                      <HighlightText text={std.phone} query={search} />
+                      <div>
+                        <HighlightText text={std.phone} query={search} />
+                      </div>
+                      {canManageCredentials && (
+                        <div className="mt-1 inline-flex items-center gap-1 bg-slate-100 border border-slate-200 rounded-md px-1.5 py-0.5 text-[10px]">
+                          <KeyRound className="w-3 h-3 text-[#B5893F] shrink-0" />
+                          <span className={std.tempPassword ? 'font-bold text-slate-800 tracking-wider' : 'text-slate-400 font-sans'}>
+                            {std.tempPassword || t('students.passwordNotSet')}
+                          </span>
+                          {std.tempPassword && (
+                            <button
+                              type="button"
+                              onClick={() => handleCopyPassword(std.tempPassword!, `unassigned-pw-${std.id}`)}
+                              className="p-0.5 text-slate-500 hover:text-slate-900 cursor-pointer"
+                              title={t('applications.copyCredentials')}
+                            >
+                              {copiedKey === `unassigned-pw-${std.id}` ? (
+                                <Check className="w-3 h-3 text-emerald-600" />
+                              ) : (
+                                <Copy className="w-3 h-3" />
+                              )}
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            onClick={() => void handleResetPassword(std)}
+                            disabled={resettingId === std.id}
+                            className="p-0.5 text-slate-500 hover:text-[#101C32] disabled:opacity-40 cursor-pointer"
+                            title={std.tempPassword ? t('students.resetPassword') : t('students.generatePassword')}
+                          >
+                            <RefreshCw className={`w-3 h-3 ${resettingId === std.id ? 'animate-spin' : ''}`} />
+                          </button>
+                        </div>
+                      )}
                     </td>
                     <td className="p-3.5 max-w-[180px] truncate">
                       <div>
@@ -513,6 +579,37 @@ export const S20_StudentsList: React.FC<StudentsListProps> = ({
                             </>
                           )}
                         </div>
+                        {canManageCredentials && (
+                          <div className="mt-1 inline-flex items-center gap-1 bg-slate-100/90 border border-slate-200 rounded-md px-1.5 py-0.5 text-[10px]">
+                            <KeyRound className="w-3 h-3 text-[#B5893F] shrink-0" />
+                            <span className={std.tempPassword ? 'font-mono font-bold text-slate-800 tracking-wider' : 'text-slate-400'}>
+                              {std.tempPassword || t('students.passwordNotSet')}
+                            </span>
+                            {std.tempPassword && (
+                              <button
+                                type="button"
+                                onClick={() => handleCopyPassword(std.tempPassword!, `row-pw-${std.id}`)}
+                                className="p-0.5 text-slate-500 hover:text-slate-900 cursor-pointer"
+                                title={t('applications.copyCredentials')}
+                              >
+                                {copiedKey === `row-pw-${std.id}` ? (
+                                  <Check className="w-3 h-3 text-emerald-600" />
+                                ) : (
+                                  <Copy className="w-3 h-3" />
+                                )}
+                              </button>
+                            )}
+                            <button
+                              type="button"
+                              onClick={() => void handleResetPassword(std)}
+                              disabled={resettingId === std.id}
+                              className="p-0.5 text-slate-500 hover:text-[#101C32] disabled:opacity-40 cursor-pointer"
+                              title={std.tempPassword ? t('students.resetPassword') : t('students.generatePassword')}
+                            >
+                              <RefreshCw className={`w-3 h-3 ${resettingId === std.id ? 'animate-spin' : ''}`} />
+                            </button>
+                          </div>
+                        )}
                       </td>
 
                       {/* Room & Bed */}

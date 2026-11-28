@@ -128,7 +128,43 @@ export function normalizePhoneKey(input: string): string {
   if (digits.length === 9) {
     return `998${digits}`;
   }
+  if (digits.length === 14 && digits.startsWith('00998')) {
+    return digits.slice(2);
+  }
   return digits;
+}
+
+export function normalizeResidentPhoneLocal9(input?: string | null): string {
+  let digits = String(input || '').replace(/\D/g, '');
+  if (digits.startsWith('00')) {
+    digits = digits.slice(2);
+  }
+  if (digits.startsWith('998') && digits.length >= 12) {
+    digits = digits.slice(3);
+  }
+  if (digits.length >= 9) {
+    return digits.slice(-9);
+  }
+  return digits;
+}
+
+export function phonesMatch(a?: string | null, b?: string | null): boolean {
+  const trimA = String(a || '').trim();
+  const trimB = String(b || '').trim();
+  if (!trimA || !trimB) return false;
+  if (trimA === trimB) return true;
+
+  const digitsA = trimA.replace(/\D/g, '');
+  const digitsB = trimB.replace(/\D/g, '');
+  if (!digitsA || !digitsB) return false;
+
+  const localA = normalizeResidentPhoneLocal9(digitsA);
+  const localB = normalizeResidentPhoneLocal9(digitsB);
+  if (localA.length === 9 && localB.length === 9 && localA === localB) {
+    return true;
+  }
+
+  return digitsA.length >= 7 && digitsA === digitsB;
 }
 
 export function formatUzPhoneDisplay(input: string): string {

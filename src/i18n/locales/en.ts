@@ -280,6 +280,11 @@ export const en: TranslationDictionary = {
   'students.awaitingDesc': 'Approved residents awaiting room and bed assignment',
   'students.searchSummary': 'Found {count} match(es) for "{query}" (matches highlighted)',
   'students.searchNoResults': 'No residents found for "{query}"',
+  'students.cabinetCredentials': 'Resident Cabinet Login Credentials',
+  'students.resetPassword': 'Reset Password',
+  'students.generatePassword': 'Generate Password',
+  'students.passwordResetToast': 'New temporary password generated: {password}',
+  'students.passwordNotSet': 'Password not set',
 
   // Add / Edit Student Modal
   'students.modal.addTitle': 'Add New Resident',

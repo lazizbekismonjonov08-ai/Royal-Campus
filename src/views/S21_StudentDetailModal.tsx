@@ -22,6 +22,10 @@ import {
   CheckCircle2,
   Edit3,
   Printer,
+  KeyRound,
+  Copy,
+  Check,
+  RefreshCw,
 } from 'lucide-react';
 import { ModalCloseButton } from '../components/ModalCloseButton';
 import { ConfirmDeleteModal } from '../components/ConfirmDeleteModal';
@@ -53,6 +57,7 @@ export const S21_StudentDetailModal: React.FC<StudentDetailProps> = ({
     addDisciplineRecord,
     role,
     handleAcceptPayment,
+    resetResidentTempPassword,
   } = useDorm();
   const { t, language, formatCurrency, formatDate } = useI18n();
   const [activeTab, setActiveTab] = useState<'profile' | 'payments' | 'contract' | 'discipline'>('profile');
@@ -63,6 +68,9 @@ export const S21_StudentDetailModal: React.FC<StudentDetailProps> = ({
   const [showBillingEditor, setShowBillingEditor] = useState(false);
   const [showStatementModal, setShowStatementModal] = useState(false);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const [copiedKey, setCopiedKey] = useState<string | null>(null);
+  const [isResettingPassword, setIsResettingPassword] = useState(false);
+  const canManageCredentials = role !== 'security' && role !== 'student';
 
   const { handleDismiss, handleBackdropClick } = useModalDismiss({
     onClose,
@@ -132,6 +140,31 @@ export const S21_StudentDetailModal: React.FC<StudentDetailProps> = ({
     deleteStudent(student.id);
     setShowDeleteConfirm(false);
     onClose();
+  };
+
+  const handleCopyCred = (value: string, key: string) => {
+    if (!value) return;
+    if (navigator.clipboard?.writeText) {
+      void navigator.clipboard.writeText(value);
+    }
+    setCopiedKey(key);
+    window.setTimeout(() => {
+      setCopiedKey((prev) => (prev === key ? null : prev));
+    }, 1800);
+  };
+
+  const handleResetPassword = async () => {
+    if (!canManageCredentials || isResettingPassword) return;
+    setIsResettingPassword(true);
+    try {
+      const res = await resetResidentTempPassword(student.id);
+      if (res.success && res.tempPassword) {
+        setSuccessToast(t('students.passwordResetToast', { password: res.tempPassword }));
+        window.setTimeout(() => setSuccessToast(null), 4500);
+      }
+    } finally {
+      setIsResettingPassword(false);
+    }
   };
 
   return (
@@ -301,6 +334,96 @@ export const S21_StudentDetailModal: React.FC<StudentDetailProps> = ({
                 <p><strong>{t('students.course')}:</strong> {typeof student.course === 'number' ? `${student.course}-${t('students.course').toLowerCase()}` : student.course} ({student.group})</p>
                 <p><strong>{t('students.parentPhone')}:</strong> {student.parentPhone}</p>
               </div>
+
+              {canManageCredentials && (
+                <div className="sm:col-span-2 bg-[#101C32]/5 p-4 rounded-xl border border-[#C6A15B]/40 space-y-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#C6A15B]/25 pb-2">
+                    <div className="flex items-center gap-2">
+                      <KeyRound className="w-4 h-4 text-[#B5893F]" />
+                      <h4 className="font-extrabold text-[#101C32] uppercase tracking-wider text-[10px]">
+                        {t('students.cabinetCredentials')}
+                      </h4>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => void handleResetPassword()}
+                      disabled={isResettingPassword}
+                      className="px-2.5 py-1.5 bg-[#101C32] hover:bg-[#1A2D4F] text-[#EAD096] font-bold text-[11px] rounded-lg transition-colors inline-flex items-center gap-1.5 disabled:opacity-50 cursor-pointer"
+                    >
+                      <RefreshCw className={`w-3.5 h-3.5 text-[#C6A15B] ${isResettingPassword ? 'animate-spin' : ''}`} />
+                      <span>
+                        {student.tempPassword ? t('students.resetPassword') : t('students.generatePassword')}
+                      </span>
+                    </button>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div className="bg-white border border-slate-200 rounded-xl px-3 py-2.5 flex items-center justify-between gap-2">
+                      <div className="min-w-0">
+                        <div className="text-[10px] font-semibold text-slate-500">
+                          {t('applications.tempLoginLabel')}
+                        </div>
+                        <div className="font-mono font-bold text-slate-900 text-xs truncate mt-0.5">
+                          {student.tempLogin || student.phone}
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => handleCopyCred(student.tempLogin || student.phone, 'detail-login')}
+                        className="px-2 py-1 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-[11px] font-bold inline-flex items-center gap-1 shrink-0 cursor-pointer"
+                      >
+                        {copiedKey === 'detail-login' ? (
+                          <>
+                            <Check className="w-3.5 h-3.5 text-emerald-600" />
+                            <span>{t('applications.copiedLabel')}</span>
+                          </>
+                        ) : (
+                          <>
+                            <Copy className="w-3.5 h-3.5" />
+                            <span>{t('applications.copyCredentials')}</span>
+                          </>
+                        )}
+                      </button>
+                    </div>
+
+                    <div className="bg-white border border-slate-200 rounded-xl px-3 py-2.5 flex items-center justify-between gap-2">
+                      <div className="min-w-0">
+                        <div className="text-[10px] font-semibold text-slate-500">
+                          {t('applications.tempPasswordLabel')}
+                        </div>
+                        <div
+                          className={`mt-0.5 text-xs truncate ${
+                            student.tempPassword
+                              ? 'font-mono font-extrabold text-[#101C32] tracking-wider'
+                              : 'text-slate-400 font-medium'
+                          }`}
+                        >
+                          {student.tempPassword || t('students.passwordNotSet')}
+                        </div>
+                      </div>
+                      {student.tempPassword && (
+                        <button
+                          type="button"
+                          onClick={() => handleCopyCred(student.tempPassword!, 'detail-pass')}
+                          className="px-2 py-1 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-[11px] font-bold inline-flex items-center gap-1 shrink-0 cursor-pointer"
+                        >
+                          {copiedKey === 'detail-pass' ? (
+                            <>
+                              <Check className="w-3.5 h-3.5 text-emerald-600" />
+                              <span>{t('applications.copiedLabel')}</span>
+                            </>
+                          ) : (
+                            <>
+                              <Copy className="w-3.5 h-3.5" />
+                              <span>{t('applications.copyCredentials')}</span>
+                            </>
+                          )}
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              )}
             </div>
           )}
 

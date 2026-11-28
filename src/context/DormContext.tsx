@@ -31,11 +31,16 @@ import {
 import {
   formatUzPhoneDisplay,
   normalizePhoneKey,
+  phonesMatch,
   generateSalt,
   hashPassword,
   generateTempPassword,
   validateStrongPassword,
 } from '../utils/authCrypto';
+import {
+  loadPersistedSession,
+  toStaffUserFromSummary,
+} from '../utils/sessionStorage';
 import {
   ACADEMIC_BILLING_MONTHS,
   addDaysToDateStr,
@@ -83,6 +88,7 @@ import {
   syncResetAllBeds,
   syncRoomTariffChanges,
   syncUpdateApplication,
+  syncUpdateResidentPassword,
   syncUpdateSingleBed,
   syncUpdateStaffUser,
   syncUpsertApplication,
@@ -116,6 +122,7 @@ interface DormContextType {
   roomFilter: string;
   setRoomFilter: (filter: string) => void;
   isLoadingData: boolean;
+  hasSyncedSupabase: boolean;
   refreshFromSupabase: () => Promise<void>;
 
   // Key KPI metrics
@@ -176,6 +183,10 @@ interface DormContextType {
   } | null>;
   updateStudent: (id: string, updates: Partial<Student>) => void;
   deleteStudent: (id: string) => void;
+  resetResidentTempPassword: (
+    studentId: string
+  ) => Promise<{ success: boolean; tempPassword?: string; errorMessage?: string }>;
+  syncLoggedInResidentToState: (resident: Student) => void;
   
   submitApplication: (appData: Omit<Application, 'id' | 'submittedAt' | 'status'>) => Application;
   reviewApplication: (id: string, status: ApplicationStatus, notes?: string) => string | undefined;
@@ -368,9 +379,16 @@ const STORAGE_KEY = 'ROYAL_CAMPUS_DORM_V3_STATE';
 const DormContext = createContext<DormContextType | undefined>(undefined);
 
 export const DormProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const [role, setRole] = useState<Role>('owner');
-  const [activeStudentId, setActiveStudentId] = useState<string>('');
-  const [activeStaffUser, setActiveStaffUser] = useState<StaffUser | null>(null);
+  const [initialSession] = useState(() => loadPersistedSession());
+  const [role, setRole] = useState<Role>(() => initialSession?.role ?? 'owner');
+  const [activeStudentId, setActiveStudentId] = useState<string>(() =>
+    initialSession?.sessionKind === 'resident' ? initialSession.studentId || '' : ''
+  );
+  const [activeStaffUser, setActiveStaffUser] = useState<StaffUser | null>(() =>
+    initialSession?.sessionKind === 'staff' && initialSession.staffUser
+      ? toStaffUserFromSummary(initialSession.staffUser)
+      : null
+  );
   const [roomFilter, setRoomFilter] = useState<string>('all');
 
   // Load persistent state or generate seed data
@@ -584,6 +602,7 @@ export const DormProvider: React.FC<{ children: React.ReactNode }> = ({ children
   });
 
   const [isLoadingData, setIsLoadingData] = useState<boolean>(true);
+  const [hasSyncedSupabase, setHasSyncedSupabase] = useState<boolean>(false);
 
   // Save changes to localStorage as fast client cache
   useEffect(() => {
@@ -616,12 +635,13 @@ export const DormProvider: React.FC<{ children: React.ReactNode }> = ({ children
         } catch (e) {
           console.error('Failed to cache hydrated Supabase state', e);
         }
-        return nextState;
-      });
-    } finally {
-      setIsLoadingData(false);
-    }
-  }, []);
+          return nextState;
+        });
+        setHasSyncedSupabase(true);
+      } finally {
+        setIsLoadingData(false);
+      }
+    }, []);
 
   // Load rooms, beds, applications, residents, payments, and staff_users from Supabase on startup
   // (automatically seeds 56 rooms & 344 beds once if empty)
@@ -650,6 +670,7 @@ export const DormProvider: React.FC<{ children: React.ReactNode }> = ({ children
           }
           return nextState;
         });
+        setHasSyncedSupabase(true);
       } finally {
         if (active) {
           setIsLoadingData(false);
@@ -896,10 +917,14 @@ export const DormProvider: React.FC<{ children: React.ReactNode }> = ({ children
     const validTypes: RoomType[] = ['standard', 'standard_plus', 'comfort', 'comfort_plus', 'lux'];
     const resolvedType: RoomType =
       data.roomType && validTypes.includes(data.roomType) ? data.roomType : 'comfort';
+    const rawPhone = data.phone?.trim() || '';
+    const phoneKey = normalizePhoneKey(rawPhone);
+    const formattedPhone = phoneKey.length >= 9 ? formatUzPhoneDisplay(rawPhone) : rawPhone;
+    const tempPassword = data.tempPassword?.trim() || generateTempPassword();
     const newStudent: Student = {
       id: newId,
       fullName: data.fullName?.trim() || '',
-      phone: data.phone?.trim() || '',
+      phone: formattedPhone,
       birthDate: data.birthDate?.trim() || '',
       passportNumber: data.passportNumber?.trim().toUpperCase() || '',
       university: data.university?.trim() || '',
@@ -919,6 +944,8 @@ export const DormProvider: React.FC<{ children: React.ReactNode }> = ({ children
       debtAmount: 0,
       createdAt: new Date().toISOString().slice(0, 10),
       telegramChatId: `tg_${Date.now()}`,
+      tempLogin: formattedPhone,
+      tempPassword,
     };
 
     setState((prev: typeof state) => ({
@@ -1680,22 +1707,31 @@ export const DormProvider: React.FC<{ children: React.ReactNode }> = ({ children
     let linkedStudentId = targetApp?.studentId;
     let newStudentToCreate: Student | null = null;
     let existingStudentMatchId: string | undefined;
+    let resolvedTempPassword: string | undefined;
+    let resolvedTempLogin: string | undefined;
 
     if (status === 'approved' && targetApp) {
       const targetPhoneKey = normalizePhoneKey(targetApp.phone);
+      const formattedAppPhone =
+        targetPhoneKey.length >= 9 ? formatUzPhoneDisplay(targetApp.phone) : targetApp.phone.trim();
+      resolvedTempLogin = formattedAppPhone;
       const targetPassportLower = targetApp.passportNumber.trim().toLowerCase();
       const existingStudent = students.find(
         (s: Student) =>
           s.status !== 'deleted_pending_purge' &&
           ((targetApp.studentId && s.id === targetApp.studentId) ||
             (targetPassportLower && s.passportNumber.trim().toLowerCase() === targetPassportLower) ||
-            (targetPhoneKey.length >= 7 && normalizePhoneKey(s.phone) === targetPhoneKey) ||
+            phonesMatch(s.phone, targetApp.phone) ||
             s.fullName === targetApp.fullName)
       );
 
       if (existingStudent) {
         linkedStudentId = existingStudent.id;
         existingStudentMatchId = existingStudent.id;
+        resolvedTempPassword =
+          existingStudent.tempPassword?.trim() ||
+          targetApp.tempPassword?.trim() ||
+          generateTempPassword();
       } else {
         const prefType: RoomType = targetApp.preferredRoomType || 'comfort';
         const resolvedTariff =
@@ -1705,11 +1741,12 @@ export const DormProvider: React.FC<{ children: React.ReactNode }> = ({ children
           1200000;
         const newStudentId = `std-${Date.now()}`;
         linkedStudentId = newStudentId;
+        resolvedTempPassword = targetApp.tempPassword?.trim() || generateTempPassword();
         newStudentToCreate = {
           id: newStudentId,
           applicationId: targetApp.id,
           fullName: targetApp.fullName,
-          phone: targetApp.phone,
+          phone: formattedAppPhone,
           birthDate: targetApp.birthDate,
           passportNumber: targetApp.passportNumber,
           passportFrontUrl: targetApp.passportFrontUrl,
@@ -1729,6 +1766,8 @@ export const DormProvider: React.FC<{ children: React.ReactNode }> = ({ children
           debtAmount: 0,
           createdAt: new Date().toISOString().slice(0, 10),
           telegramChatId: `tg_${Date.now()}`,
+          tempLogin: formattedAppPhone,
+          tempPassword: resolvedTempPassword,
         };
       }
     }
@@ -1755,16 +1794,17 @@ export const DormProvider: React.FC<{ children: React.ReactNode }> = ({ children
           p.studentId === targetApp.id ? { ...p, studentId: linkedStudentId! } : p
         );
 
-        const baseStudent: Student = existingStudentMatchId
+        const existingMatchedStudent = existingStudentMatchId
+          ? prev.students.find((s: Student) => s.id === existingStudentMatchId)
+          : undefined;
+        const baseStudent: Student = existingMatchedStudent
           ? {
-              ...(prev.students.find((s: Student) => s.id === existingStudentMatchId) as Student),
+              ...existingMatchedStudent,
               status: 'active' as const,
-              applicationId:
-                prev.students.find((s: Student) => s.id === existingStudentMatchId)?.applicationId ||
-                targetApp.id,
-              degreeLevel:
-                prev.students.find((s: Student) => s.id === existingStudentMatchId)?.degreeLevel ||
-                targetApp.degreeLevel,
+              applicationId: existingMatchedStudent.applicationId || targetApp.id,
+              degreeLevel: existingMatchedStudent.degreeLevel || targetApp.degreeLevel,
+              tempLogin: existingMatchedStudent.tempLogin || resolvedTempLogin,
+              tempPassword: existingMatchedStudent.tempPassword?.trim() || resolvedTempPassword,
             }
           : (newStudentToCreate as Student);
 
@@ -1775,6 +1815,8 @@ export const DormProvider: React.FC<{ children: React.ReactNode }> = ({ children
           ...targetApp,
           status: 'approved',
           studentId: linkedStudentId,
+          tempLogin: resolvedTempLogin || targetApp.tempLogin,
+          tempPassword: resolvedTempPassword || targetApp.tempPassword,
         };
         const summary = computeStudentBillingSummary({
           entityId: baseStudent.id,
@@ -1826,6 +1868,8 @@ export const DormProvider: React.FC<{ children: React.ReactNode }> = ({ children
             ...app,
             status,
             studentId: linkedStudentId || app.studentId,
+            tempLogin: resolvedTempLogin || app.tempLogin,
+            tempPassword: resolvedTempPassword || app.tempPassword,
             reviewNotes: notes || app.reviewNotes,
             reviewedBy: currentUserName,
           };
@@ -1854,6 +1898,8 @@ export const DormProvider: React.FC<{ children: React.ReactNode }> = ({ children
               status: 'active',
               applicationId: existingStd.applicationId || targetApp.id,
               degreeLevel: existingStd.degreeLevel || targetApp.degreeLevel,
+              tempLogin: existingStd.tempLogin || resolvedTempLogin,
+              tempPassword: existingStd.tempPassword?.trim() || resolvedTempPassword,
             }
           : newStudentToCreate || undefined;
         if (residentToSave) {
@@ -1896,7 +1942,7 @@ export const DormProvider: React.FC<{ children: React.ReactNode }> = ({ children
     const bedLabel = targetBed.bedIdentifier || String(targetBed.bedNumber);
     const phoneKey = normalizePhoneKey(targetStudent.phone);
     const tempLogin = phoneKey.length >= 9 ? formatUzPhoneDisplay(targetStudent.phone) : targetStudent.phone;
-    const tempPassword = generateTempPassword();
+    const tempPassword = targetStudent.tempPassword?.trim() || generateTempPassword();
     const salt = generateSalt();
     const passwordHash = await hashPassword(tempPassword, salt);
     const nowIso = new Date().toISOString();
@@ -4574,7 +4620,10 @@ export const DormProvider: React.FC<{ children: React.ReactNode }> = ({ children
         if (matchedStd && acc.studentId === matchedStd.id) {
           return true;
         }
-        if (resolvedPhoneKey.length >= 7 && (accPhoneKey === resolvedPhoneKey || accId === resolvedPhoneKey)) {
+        if (
+          phonesMatch(acc.phone, identifier) ||
+          (resolvedPhoneKey.length >= 7 && (accPhoneKey === resolvedPhoneKey || accId === resolvedPhoneKey))
+        ) {
           return true;
         }
         return false;
@@ -4582,6 +4631,112 @@ export const DormProvider: React.FC<{ children: React.ReactNode }> = ({ children
     },
     [userAccounts, applications, students]
   );
+
+  const resetResidentTempPassword: DormContextType['resetResidentTempPassword'] = async (
+    studentId
+  ) => {
+    if (role === 'security' || role === 'student') {
+      return { success: false, errorMessage: 'Unauthorized' };
+    }
+
+    const target = (students as Student[]).find((s) => s.id === studentId);
+    if (!target) {
+      return { success: false, errorMessage: 'Resident not found' };
+    }
+
+    const newTempPassword = generateTempPassword();
+    const phoneKey = normalizePhoneKey(target.phone);
+    const formattedPhone = phoneKey.length >= 9 ? formatUzPhoneDisplay(target.phone) : target.phone.trim();
+    const salt = generateSalt();
+    const passwordHash = await hashPassword(newTempPassword, salt);
+    const nowIso = new Date().toISOString();
+
+    const syncRes = await syncUpdateResidentPassword(studentId, newTempPassword, {
+      ...target,
+      phone: formattedPhone,
+      tempLogin: formattedPhone,
+      tempPassword: newTempPassword,
+    });
+    if (!syncRes.ok) {
+      return { success: false, errorMessage: syncRes.error };
+    }
+
+    setState((prev: typeof state) => {
+      const nextStudents = prev.students.map((s: Student) =>
+        s.id === studentId
+          ? {
+              ...s,
+              tempLogin: s.tempLogin || formattedPhone,
+              tempPassword: newTempPassword,
+            }
+          : s
+      );
+
+      const nextApplications = prev.applications.map((a: Application) =>
+        a.studentId === studentId || (target.applicationId && a.id === target.applicationId)
+          ? {
+              ...a,
+              tempLogin: a.tempLogin || formattedPhone,
+              tempPassword: newTempPassword,
+            }
+          : a
+      );
+
+      const existingAccounts: StoredUserAccount[] = Array.isArray(prev.userAccounts)
+        ? prev.userAccounts
+        : [];
+      const existingIdx = existingAccounts.findIndex(
+        (acc) => acc.studentId === studentId || phonesMatch(acc.phone, target.phone)
+      );
+      const updatedAcct: StoredUserAccount = {
+        id: existingIdx >= 0 ? existingAccounts[existingIdx].id : `acct-${Date.now()}`,
+        identifier: phoneKey.length >= 7 ? phoneKey : formattedPhone.toLowerCase(),
+        phone: formattedPhone,
+        role: 'student',
+        studentId,
+        applicationId: target.applicationId,
+        passwordHash,
+        passwordSalt: salt,
+        updatedAt: nowIso,
+      };
+      const nextUserAccounts =
+        existingIdx >= 0
+          ? existingAccounts.map((acc, idx) => (idx === existingIdx ? updatedAcct : acc))
+          : [updatedAcct, ...existingAccounts];
+
+      return {
+        ...prev,
+        students: nextStudents,
+        applications: nextApplications,
+        userAccounts: nextUserAccounts,
+      };
+    });
+
+    addAudit('Rezident vaqtinchalik paroli yangilandi', 'Student', studentId, undefined, target.fullName);
+    return { success: true, tempPassword: newTempPassword };
+  };
+
+  const syncLoggedInResidentToState = useCallback((resident: Student) => {
+    setState((prev: typeof state) => {
+      const exists = prev.students.some((s: Student) => s.id === resident.id);
+      const nextStudents = exists
+        ? prev.students.map((s: Student) =>
+            s.id === resident.id
+              ? {
+                  ...s,
+                  ...resident,
+                  roomId: s.roomId || resident.roomId,
+                  monthlyTariff: resident.monthlyTariff || s.monthlyTariff,
+                }
+              : s
+          )
+        : [resident, ...prev.students];
+      return {
+        ...prev,
+        students: nextStudents,
+      };
+    });
+  }, []);
 
   const registerStudentAccount = (params: {
     fullName?: string;
@@ -5046,11 +5201,14 @@ export const DormProvider: React.FC<{ children: React.ReactNode }> = ({ children
       roomFilter,
       setRoomFilter,
       isLoadingData,
+      hasSyncedSupabase,
       refreshFromSupabase,
       addStudent,
       createResidentWithPlacement,
       updateStudent,
       deleteStudent,
+      resetResidentTempPassword,
+      syncLoggedInResidentToState,
       submitApplication,
       reviewApplication,
       deleteApplication,
@@ -5125,6 +5283,7 @@ export const DormProvider: React.FC<{ children: React.ReactNode }> = ({ children
       stats,
       roomFilter,
       isLoadingData,
+      hasSyncedSupabase,
       refreshFromSupabase,
       refreshStaffUsers,
       canConfigureRooms,

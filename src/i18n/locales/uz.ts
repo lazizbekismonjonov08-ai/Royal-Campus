@@ -280,6 +280,11 @@ export const uz: TranslationDictionary = {
   'students.awaitingDesc': 'Yotoqxonaga tasdiqlangan, ammo xona va o‘rin biriktirilmagan rezidentlar',
   'students.searchSummary': '«{query}» qidiruvi bo‘yicha {count} ta natija topildi (mos kelgan matnlar sariq fonda belgilandi)',
   'students.searchNoResults': '«{query}» bo‘yicha rezident topilmadi',
+  'students.cabinetCredentials': 'Rezident kabinetiga kirish ma’lumotlari',
+  'students.resetPassword': 'Parolni yangilash',
+  'students.generatePassword': 'Parol yaratish',
+  'students.passwordResetToast': 'Yangi vaqtinchalik parol yaratildi: {password}',
+  'students.passwordNotSet': 'Parol o‘rnatilmagan',
 
   // Add / Edit Student Modal
   'students.modal.addTitle': 'Yangi rezident qo‘shish',

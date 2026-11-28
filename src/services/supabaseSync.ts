@@ -33,7 +33,7 @@ import {
   safeAmount,
 } from '../utils/billingUtils';
 import { displayToIsoDate, normalizeToDisplayDate } from '../utils/dateValidation';
-import { formatUzPhoneDisplay, normalizePhoneKey } from '../utils/authCrypto';
+import { formatUzPhoneDisplay, normalizePhoneKey, phonesMatch } from '../utils/authCrypto';
 
 // ==========================================
 // SUPABASE PUBLIC SCHEMA ROW DEFINITIONS
@@ -386,7 +386,7 @@ export function studentToSupabaseRow(student: Student): SupabaseResidentRow {
     application_id: student.applicationId || null,
     full_name: student.fullName.trim(),
     phone: student.phone.trim(),
-    password: student.tempPassword || null,
+    password: student.tempPassword?.trim() || null,
     birth_date: toSupabaseDateOrNull(student.birthDate),
     passport: student.passportNumber.trim().toUpperCase(),
     university: student.university.trim(),
@@ -1641,4 +1641,175 @@ export async function verifyStaffLoginWithSupabase(
   }
 
   return { status: 'ok', staffUser: matched };
+}
+
+// ==========================================
+// RESIDENT LOGIN VERIFICATION & PASSWORD SYNC
+// ==========================================
+
+export function supabaseRowToBasicStudent(rr: SupabaseResidentRow): Student {
+  const roomType: RoomType = parseTierFromDb(rr.tier);
+  const phoneKey = normalizePhoneKey(rr.phone || '');
+  const formattedPhone =
+    phoneKey.length >= 9 ? formatUzPhoneDisplay(rr.phone) : String(rr.phone || '').trim();
+  const bedIdent =
+    rr.bed_number !== null && rr.bed_number !== undefined ? String(rr.bed_number) : undefined;
+  const bedNumParsed = bedIdent !== undefined ? Number(bedIdent) : undefined;
+  const paidUntilIso = toSupabaseDateOrNull(rr.paid_until) || '';
+  const createdDateIso =
+    extractDatePart(rr.created_at || '') || new Date().toISOString().slice(0, 10);
+
+  return {
+    id: String(rr.id),
+    applicationId: rr.application_id || undefined,
+    fullName: String(rr.full_name || '').trim(),
+    phone: formattedPhone,
+    birthDate: rr.birth_date ? normalizeToDisplayDate(rr.birth_date) : '',
+    passportNumber: String(rr.passport || '').trim().toUpperCase(),
+    university: String(rr.university || '').trim(),
+    faculty: String(rr.faculty || '').trim(),
+    degreeLevel: rr.degree || 'Bakalavr',
+    course:
+      rr.course !== null && rr.course !== undefined && /^\d+$/.test(String(rr.course))
+        ? Number(rr.course)
+        : rr.course || 1,
+    group: String(rr.group_name || '').trim(),
+    parentPhone: String(rr.parent_phone || '').trim(),
+    permanentAddress: String(rr.address || '').trim(),
+    status: 'active',
+    bedId: rr.bed_id || undefined,
+    roomNumber:
+      rr.room_number !== null && rr.room_number !== undefined
+        ? String(rr.room_number)
+        : undefined,
+    bedNumber:
+      bedNumParsed !== undefined && !Number.isNaN(bedNumParsed) ? bedNumParsed : bedIdent,
+    bedIdentifier: bedIdent,
+    floor: rr.floor !== null && rr.floor !== undefined ? Number(rr.floor) : undefined,
+    roomType,
+    monthlyTariff:
+      safeAmount(rr.monthly_rate, 0) > 0
+        ? safeAmount(rr.monthly_rate)
+        : INITIAL_SETTINGS.roomTariffs[roomType],
+    paidUntil: paidUntilIso,
+    nextPaymentDueDate: paidUntilIso,
+    nextPaymentDate: paidUntilIso,
+    debtAmount: 0,
+    createdAt: createdDateIso,
+    tempLogin: formattedPhone,
+    tempPassword: rr.password ? String(rr.password).trim() : undefined,
+  };
+}
+
+export async function syncUpdateResidentPassword(
+  residentId: string,
+  newPassword: string,
+  fallbackStudent?: Student
+): Promise<{ ok: boolean; error?: string }> {
+  const trimmedPw = newPassword.trim();
+  if (!trimmedPw) {
+    return { ok: false, error: 'Empty password' };
+  }
+  try {
+    const { data, error } = await supabase
+      .from('residents')
+      .update({ password: trimmedPw })
+      .eq('id', residentId)
+      .select('id');
+
+    if (error) {
+      console.error('[SupabaseSync] Failed to update resident password:', error.message);
+      return { ok: false, error: error.message };
+    }
+
+    if ((!data || data.length === 0) && fallbackStudent) {
+      const upserted = await syncUpsertResident({
+        ...fallbackStudent,
+        tempPassword: trimmedPw,
+      });
+      return { ok: upserted };
+    }
+
+    return { ok: true };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : 'Unknown error';
+    console.error('[SupabaseSync] Error updating resident password:', msg);
+    return { ok: false, error: msg };
+  }
+}
+
+export type ResidentLoginVerificationResult =
+  | { status: 'ok'; resident: Student }
+  | { status: 'invalid_password' }
+  | { status: 'no_password'; resident: Student }
+  | { status: 'not_found' };
+
+/**
+ * Queries Supabase `residents` directly during login and matches residents by
+ * normalized phone (last 9 digits, stripped +, 998, spaces, dashes, parentheses, or exact),
+ * passport, or application ID, then verifies the trimmed password against `residents.password`.
+ */
+export async function verifyResidentLoginWithSupabase(
+  identifierInput: string,
+  passwordInput: string,
+  cachedStudents: Student[] = []
+): Promise<ResidentLoginVerificationResult> {
+  const trimmedId = identifierInput.trim();
+  const trimmedPassword = passwordInput.trim();
+  if (!trimmedId || !trimmedPassword) {
+    return { status: 'not_found' };
+  }
+
+  const loweredId = trimmedId.toLowerCase();
+  let sourceStudents: Student[] = [];
+
+  try {
+    const { data, error } = await supabase.from('residents').select('*');
+    if (!error && Array.isArray(data)) {
+      const rows = [...(data as SupabaseResidentRow[])].sort((a, b) =>
+        String(b.created_at || '').localeCompare(String(a.created_at || ''))
+      );
+      sourceStudents = rows.map(supabaseRowToBasicStudent);
+    } else {
+      if (error) {
+        console.warn('[SupabaseSync] Could not query residents during login:', error.message);
+      }
+      sourceStudents = cachedStudents.filter((s) => s.status !== 'deleted_pending_purge');
+    }
+  } catch (err) {
+    console.warn(
+      '[SupabaseSync] Error querying residents during login:',
+      err instanceof Error ? err.message : 'Unknown error'
+    );
+    sourceStudents = cachedStudents.filter((s) => s.status !== 'deleted_pending_purge');
+  }
+
+  const matchingResidents = sourceStudents.filter((s) => {
+    const phoneMatched = phonesMatch(s.phone, trimmedId);
+    const passportMatched =
+      Boolean(s.passportNumber) && s.passportNumber.trim().toLowerCase() === loweredId;
+    const appIdMatched =
+      Boolean(s.applicationId) && s.applicationId!.trim().toLowerCase() === loweredId;
+    return phoneMatched || passportMatched || appIdMatched;
+  });
+
+  if (matchingResidents.length === 0) {
+    return { status: 'not_found' };
+  }
+
+  // Prefer an exact password match among any matching resident rows
+  const passwordMatched = matchingResidents.find(
+    (s) => Boolean(s.tempPassword && s.tempPassword.trim()) && s.tempPassword!.trim() === trimmedPassword
+  );
+  if (passwordMatched) {
+    return { status: 'ok', resident: passwordMatched };
+  }
+
+  // If any matching resident has a saved password in Supabase, reject wrong password
+  const hasSavedPassword = matchingResidents.some((s) => Boolean(s.tempPassword && s.tempPassword.trim()));
+  if (hasSavedPassword) {
+    return { status: 'invalid_password' };
+  }
+
+  return { status: 'no_password', resident: matchingResidents[0] };
 }

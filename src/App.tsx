@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { DormProvider, useDorm } from './context/DormContext';
 import { I18nProvider } from './i18n/I18nContext';
 import { Header } from './components/Header';
@@ -6,10 +6,22 @@ import { Sidebar } from './components/Sidebar';
 import { TelegramBotWidget } from './components/TelegramBotWidget';
 
 // Views
-import { RoomType } from './types';
-import { normalizePhoneKey } from './utils/authCrypto';
+import { Role, RoomType } from './types';
+import { normalizePhoneKey, resolveStaffRoleFromTitle } from './utils/authCrypto';
+import {
+  PUBLIC_VIEWS,
+  SessionKind,
+  clearPersistedSession,
+  getDefaultViewForRole,
+  loadPersistedSession,
+  parseHashRoute,
+  resolveInitialView,
+  sanitizeViewForSession,
+  savePersistedSession,
+  syncUrlHash,
+} from './utils/sessionStorage';
 import { S00_LandingPage } from './views/S00_LandingPage';
-import { S01_Login } from './views/S01_Login';
+import { LoginSuccessMeta, S01_Login } from './views/S01_Login';
 import { S03_OnlineApplication } from './views/S03_OnlineApplication';
 import { S05_StudentDashboard } from './views/S05_StudentDashboard';
 import { S06_StudentProfile } from './views/S06_StudentProfile';
@@ -37,54 +49,171 @@ import { S130_Settings } from './views/S130_Settings';
 import { S140_AuditLog } from './views/S140_AuditLog';
 import { S150_AccessControl } from './views/S150_AccessControl';
 
-const isStaffHashActive = (): boolean =>
-  typeof window !== 'undefined' && window.location.hash.toLowerCase().startsWith('#staff');
-
-const clearStaffHash = () => {
-  if (typeof window !== 'undefined' && isStaffHashActive()) {
-    window.history.replaceState(null, '', window.location.pathname + window.location.search);
-  }
-};
-
 const MainAppContent: React.FC = () => {
-  const { role, setRole, setActiveStaffUser, students } = useDorm();
-  const [activeView, setActiveView] = useState<string>(() =>
-    isStaffHashActive() ? 'S01_StaffLogin' : 'S00_LandingPage'
+  const {
+    role,
+    setRole,
+    activeStudentId,
+    setActiveStudentId,
+    activeStaffUser,
+    setActiveStaffUser,
+    students,
+    staffUsers,
+    hasSyncedSupabase,
+  } = useDorm();
+
+  const [initialSession] = useState(() => loadPersistedSession());
+  const [sessionKind, setSessionKind] = useState<SessionKind | null>(
+    () => initialSession?.sessionKind ?? null
   );
-  const [isStaffSession, setIsStaffSession] = useState<boolean>(false);
+  const [activeView, setActiveView] = useState<string>(() =>
+    resolveInitialView(
+      initialSession,
+      typeof window !== 'undefined' ? window.location.hash : ''
+    )
+  );
+  const [lastAuthView, setLastAuthView] = useState<string>(() =>
+    initialSession
+      ? sanitizeViewForSession(
+          initialSession.activeView,
+          initialSession.sessionKind,
+          initialSession.role
+        )
+      : 'S10_Dashboard'
+  );
+  const isStaffSession = sessionKind === 'owner' || sessionKind === 'staff';
+  const needsStaffReconcileRef = useRef<boolean>(initialSession?.sessionKind === 'staff');
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState<boolean>(false);
   const [applicationPrefillRoomType, setApplicationPrefillRoomType] = useState<RoomType | undefined>(undefined);
 
+  // Persist active authenticated session + view and keep URL hash in sync (GitHub Pages safe)
+  useEffect(() => {
+    syncUrlHash(activeView, sessionKind, role);
+
+    if (sessionKind && !PUBLIC_VIEWS.has(activeView)) {
+      const safeView = sanitizeViewForSession(activeView, sessionKind, role);
+      setLastAuthView(safeView);
+      savePersistedSession({
+        sessionKind,
+        role,
+        activeView: safeView,
+        studentId: sessionKind === 'resident' ? activeStudentId : undefined,
+        staffUser: sessionKind === 'staff' ? activeStaffUser : null,
+      });
+    }
+  }, [activeView, sessionKind, role, activeStudentId, activeStaffUser]);
+
+  // Reconcile persisted Staff session with fresh Supabase staff_users after initial background sync
+  useEffect(() => {
+    if (
+      !needsStaffReconcileRef.current ||
+      !hasSyncedSupabase ||
+      sessionKind !== 'staff' ||
+      !activeStaffUser
+    ) {
+      return;
+    }
+
+    needsStaffReconcileRef.current = false;
+    const freshStaff = staffUsers.find((u) => u.id === activeStaffUser.id);
+    if (!freshStaff || !freshStaff.isActive) {
+      clearPersistedSession();
+      setSessionKind(null);
+      setActiveStaffUser(null);
+      setRole('student');
+      setActiveView('S01_Login');
+      return;
+    }
+
+    const freshRole = resolveStaffRoleFromTitle(freshStaff.roleTitle);
+    setActiveStaffUser(freshStaff);
+    if (role !== freshRole) {
+      setRole(freshRole);
+    }
+  }, [hasSyncedSupabase, sessionKind, activeStaffUser, staffUsers, role, setActiveStaffUser, setRole]);
+
+  // Handle browser Back/Forward & manual hash changes without losing active sessions or bypassing auth
   useEffect(() => {
     const onHashChange = () => {
-      if (isStaffHashActive()) {
-        setIsStaffSession(false);
-        setActiveStaffUser(null);
+      const parsed = parseHashRoute(window.location.hash);
+
+      if (parsed.scope === 'apply') {
+        setActiveView('S03_OnlineApplication');
+        return;
+      }
+
+      if (parsed.scope === 'home' || parsed.scope === 'landing_anchor') {
+        setActiveView('S00_LandingPage');
+        return;
+      }
+
+      if (sessionKind) {
+        if (
+          (parsed.scope === 'owner' && sessionKind === 'owner') ||
+          (parsed.scope === 'staff' && sessionKind === 'staff') ||
+          (parsed.scope === 'resident' && sessionKind === 'resident')
+        ) {
+          setActiveView(
+            sanitizeViewForSession(parsed.view || lastAuthView, sessionKind, role)
+          );
+          return;
+        }
+        return;
+      }
+
+      if (parsed.scope === 'staff' || parsed.scope === 'staff_login') {
         setActiveView('S01_StaffLogin');
+      } else if (parsed.scope === 'login' || parsed.scope === 'owner' || parsed.scope === 'resident') {
+        setActiveView('S01_Login');
       }
     };
+
     window.addEventListener('hashchange', onHashChange);
     return () => window.removeEventListener('hashchange', onHashChange);
-  }, [setActiveStaffUser]);
+  }, [sessionKind, role, lastAuthView]);
 
   const handleNavigate = (view: string) => {
-    if (view === 'S00_LandingPage') {
-      clearStaffHash();
-    }
     setActiveView(view);
     setIsMobileMenuOpen(false);
   };
 
+  const handleLoginSuccess = (selRole: Role, meta?: LoginSuccessMeta) => {
+    const resolvedKind: SessionKind =
+      meta?.sessionKind ?? (selRole === 'student' ? 'resident' : 'owner');
+    const resolvedRole: Role =
+      resolvedKind === 'resident' ? 'student' : selRole;
+    const targetView = getDefaultViewForRole(resolvedRole);
+
+    savePersistedSession({
+      sessionKind: resolvedKind,
+      role: resolvedRole,
+      activeView: targetView,
+      studentId: resolvedKind === 'resident' ? meta?.studentId || activeStudentId : undefined,
+      staffUser: resolvedKind === 'staff' ? meta?.staffUser || activeStaffUser : null,
+    });
+
+    needsStaffReconcileRef.current = false;
+    setSessionKind(resolvedKind);
+    setRole(resolvedRole);
+    setLastAuthView(targetView);
+    setActiveView(targetView);
+  };
+
   const handleLogout = () => {
+    needsStaffReconcileRef.current = false;
+    clearPersistedSession();
     setIsMobileMenuOpen(false);
+    setSelectedStudentDetailId(null);
+    setSelectedRoomDetailId(null);
+    setShowAddStudentModal(false);
+    setShowAssignModal(false);
+    setShowAddPaymentModal(false);
+    setSessionKind(null);
     setActiveStaffUser(null);
-    if (isStaffSession) {
-      setIsStaffSession(false);
-      setActiveView(isStaffHashActive() ? 'S01_StaffLogin' : 'S01_Login');
-      return;
-    }
+    setActiveStudentId('');
     setRole('student');
-    setActiveView('S01_Login');
+    setActiveView('S00_LandingPage');
+    syncUrlHash('S00_LandingPage', null, 'student');
   };
 
   // Modals state
@@ -99,7 +228,15 @@ const MainAppContent: React.FC = () => {
   const [showAddPaymentModal, setShowAddPaymentModal] = useState(false);
   const [addPaymentInitialStudentId, setAddPaymentInitialStudentId] = useState<string | undefined>(undefined);
 
-  // Unauthenticated screen states
+  const handleOpenCabinetOrLogin = () => {
+    if (sessionKind) {
+      setActiveView(sanitizeViewForSession(lastAuthView, sessionKind, role));
+      return;
+    }
+    setActiveView('S01_Login');
+  };
+
+  // Unauthenticated / public screen states
   if (activeView === 'S00_LandingPage') {
     return (
       <S00_LandingPage
@@ -107,8 +244,8 @@ const MainAppContent: React.FC = () => {
           setApplicationPrefillRoomType(roomType);
           setActiveView('S03_OnlineApplication');
         }}
-        onLoginClick={() => setActiveView('S01_Login')}
-        onGoToLogin={() => setActiveView('S01_Login')}
+        onLoginClick={handleOpenCabinetOrLogin}
+        onGoToLogin={handleOpenCabinetOrLogin}
       />
     );
   }
@@ -117,26 +254,12 @@ const MainAppContent: React.FC = () => {
     return (
       <S01_Login
         portalMode="student"
-        onLoginSuccess={(selRole) => {
-          if (selRole !== 'student') {
-            setIsStaffSession(true);
-            setRole(selRole);
-            if (selRole === 'security') setActiveView('S150_AccessControl');
-            else if (selRole === 'cleaner') setActiveView('S40_Rooms');
-            else if (selRole === 'receptionist') setActiveView('S20_Students');
-            else setActiveView('S10_Dashboard');
-          } else {
-            setIsStaffSession(false);
-            setRole('student');
-            setActiveView('S05_StudentDashboard');
-          }
-        }}
+        onLoginSuccess={handleLoginSuccess}
         onGoToPublicApp={() => {
           setApplicationPrefillRoomType(undefined);
           setActiveView('S03_OnlineApplication');
         }}
         onGoToLanding={() => {
-          clearStaffHash();
           setActiveView('S00_LandingPage');
         }}
       />
@@ -147,21 +270,12 @@ const MainAppContent: React.FC = () => {
     return (
       <S01_Login
         portalMode="staff"
-        onLoginSuccess={(selRole) => {
-          setIsStaffSession(true);
-          if (selRole === 'student') setActiveView('S05_StudentDashboard');
-          else if (selRole === 'security') setActiveView('S150_AccessControl');
-          else if (selRole === 'cleaner') setActiveView('S40_Rooms');
-          else if (selRole === 'receptionist') setActiveView('S20_Students');
-          else setActiveView('S10_Dashboard');
-        }}
+        onLoginSuccess={handleLoginSuccess}
         onGoToPublicApp={() => {
-          clearStaffHash();
           setApplicationPrefillRoomType(undefined);
           setActiveView('S03_OnlineApplication');
         }}
         onGoToLanding={() => {
-          clearStaffHash();
           setActiveView('S00_LandingPage');
         }}
       />
@@ -172,9 +286,21 @@ const MainAppContent: React.FC = () => {
     return (
       <S03_OnlineApplication
         initialRoomType={applicationPrefillRoomType}
-        onSubmitted={() => setActiveView('S00_LandingPage')}
-        onBackToLogin={() => setActiveView('S00_LandingPage')}
-        onGoToLogin={() => setActiveView('S01_Login')}
+        onSubmitted={() =>
+          setActiveView(
+            sessionKind
+              ? sanitizeViewForSession(lastAuthView, sessionKind, role)
+              : 'S00_LandingPage'
+          )
+        }
+        onBackToLogin={() =>
+          setActiveView(
+            sessionKind
+              ? sanitizeViewForSession(lastAuthView, sessionKind, role)
+              : 'S00_LandingPage'
+          )
+        }
+        onGoToLogin={handleOpenCabinetOrLogin}
       />
     );
   }
@@ -194,6 +320,9 @@ const MainAppContent: React.FC = () => {
           return <S08_StudentPayments />;
         case 'S09_StudentContract':
           return <S09_StudentContract />;
+        case 'S90_Issues':
+        case 'S100_Issues':
+          return <S90_IssuesList />;
         default:
           return <S05_StudentDashboard onNavigate={handleNavigate} />;
       }
