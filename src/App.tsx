@@ -12,12 +12,15 @@ import {
   PUBLIC_VIEWS,
   SessionKind,
   clearPersistedSession,
+  consumeProgrammaticHashMatch,
   getDefaultViewForRole,
   loadPersistedSession,
+  loadPersistedView,
   parseHashRoute,
   resolveInitialView,
   sanitizeViewForSession,
   savePersistedSession,
+  savePersistedView,
   syncUrlHash,
 } from './utils/sessionStorage';
 import { S00_LandingPage } from './views/S00_LandingPage';
@@ -59,36 +62,46 @@ const MainAppContent: React.FC = () => {
     setActiveStaffUser,
     students,
     staffUsers,
+    isLoadingData,
     hasSyncedSupabase,
   } = useDorm();
 
-  const [initialSession] = useState(() => loadPersistedSession());
-  const [sessionKind, setSessionKind] = useState<SessionKind | null>(
-    () => initialSession?.sessionKind ?? null
-  );
-  const [activeView, setActiveView] = useState<string>(() =>
-    resolveInitialView(
-      initialSession,
-      typeof window !== 'undefined' ? window.location.hash : ''
-    )
-  );
-  const [lastAuthView, setLastAuthView] = useState<string>(() =>
-    initialSession
+  // Synchronously read saved session, view, and URL hash on the very first render (never flashes Home)
+  const [initialBoot] = useState(() => {
+    const savedSession = loadPersistedSession();
+    const savedView = loadPersistedView();
+    const initialHash = typeof window !== 'undefined' ? window.location.hash : '';
+    const resolvedView = resolveInitialView(savedSession, initialHash, savedView);
+    const resolvedLastAuthView = savedSession
       ? sanitizeViewForSession(
-          initialSession.activeView,
-          initialSession.sessionKind,
-          initialSession.role
+          savedView && !PUBLIC_VIEWS.has(savedView) ? savedView : savedSession.activeView,
+          savedSession.sessionKind,
+          savedSession.role
         )
-      : 'S10_Dashboard'
+      : 'S10_Dashboard';
+    return {
+      savedSession,
+      resolvedView,
+      resolvedLastAuthView,
+    };
+  });
+
+  const [sessionKind, setSessionKind] = useState<SessionKind | null>(
+    () => initialBoot.savedSession?.sessionKind ?? null
   );
+  const [activeView, setActiveView] = useState<string>(() => initialBoot.resolvedView);
+  const [lastAuthView, setLastAuthView] = useState<string>(() => initialBoot.resolvedLastAuthView);
   const isStaffSession = sessionKind === 'owner' || sessionKind === 'staff';
-  const needsStaffReconcileRef = useRef<boolean>(initialSession?.sessionKind === 'staff');
+  const needsStaffReconcileRef = useRef<boolean>(
+    initialBoot.savedSession?.sessionKind === 'staff'
+  );
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState<boolean>(false);
   const [applicationPrefillRoomType, setApplicationPrefillRoomType] = useState<RoomType | undefined>(undefined);
 
-  // Persist active authenticated session + view and keep URL hash in sync (GitHub Pages safe)
+  // Keep localStorage (`royal_campus_session`, `royal_campus_view`) and URL hash synced on every state change
   useEffect(() => {
     syncUrlHash(activeView, sessionKind, role);
+    savePersistedView(activeView);
 
     if (sessionKind && !PUBLIC_VIEWS.has(activeView)) {
       const safeView = sanitizeViewForSession(activeView, sessionKind, role);
@@ -103,11 +116,12 @@ const MainAppContent: React.FC = () => {
     }
   }, [activeView, sessionKind, role, activeStudentId, activeStaffUser]);
 
-  // Reconcile persisted Staff session with fresh Supabase staff_users after initial background sync
+  // Refresh restored Staff metadata in place once Supabase finishes loading (never redirects while loading)
   useEffect(() => {
     if (
-      !needsStaffReconcileRef.current ||
+      isLoadingData ||
       !hasSyncedSupabase ||
+      !needsStaffReconcileRef.current ||
       sessionKind !== 'staff' ||
       !activeStaffUser
     ) {
@@ -115,13 +129,18 @@ const MainAppContent: React.FC = () => {
     }
 
     needsStaffReconcileRef.current = false;
+    if (staffUsers.length === 0) return;
+
     const freshStaff = staffUsers.find((u) => u.id === activeStaffUser.id);
-    if (!freshStaff || !freshStaff.isActive) {
+    if (!freshStaff) return;
+
+    if (!freshStaff.isActive) {
       clearPersistedSession();
       setSessionKind(null);
       setActiveStaffUser(null);
       setRole('student');
       setActiveView('S01_Login');
+      syncUrlHash('S01_Login', null, 'student');
       return;
     }
 
@@ -130,20 +149,62 @@ const MainAppContent: React.FC = () => {
     if (role !== freshRole) {
       setRole(freshRole);
     }
-  }, [hasSyncedSupabase, sessionKind, activeStaffUser, staffUsers, role, setActiveStaffUser, setRole]);
+  }, [
+    isLoadingData,
+    hasSyncedSupabase,
+    sessionKind,
+    activeStaffUser,
+    staffUsers,
+    role,
+    setActiveStaffUser,
+    setRole,
+  ]);
 
-  // Handle browser Back/Forward & manual hash changes without losing active sessions or bypassing auth
+  // Handle browser Back/Forward & manual hash edits without losing active sessions or bypassing auth
   useEffect(() => {
     const onHashChange = () => {
-      const parsed = parseHashRoute(window.location.hash);
+      const rawHash = window.location.hash;
+      if (consumeProgrammaticHashMatch(rawHash)) {
+        return;
+      }
+
+      const parsed = parseHashRoute(rawHash);
+
+      if (parsed.scope === 'empty') {
+        // Never reset an authenticated user back to Home on empty hash
+        if (!sessionKind) {
+          setActiveView('S00_LandingPage');
+        }
+        return;
+      }
 
       if (parsed.scope === 'apply') {
+        savePersistedView('S03_OnlineApplication');
         setActiveView('S03_OnlineApplication');
         return;
       }
 
-      if (parsed.scope === 'home' || parsed.scope === 'landing_anchor') {
+      if (parsed.scope === 'home') {
+        savePersistedView('S00_LandingPage');
         setActiveView('S00_LandingPage');
+        return;
+      }
+
+      if (parsed.scope === 'landing_anchor') {
+        if (
+          rawHash.trim().toLowerCase() === '#rooms' &&
+          sessionKind &&
+          sessionKind !== 'resident' &&
+          activeView !== 'S00_LandingPage'
+        ) {
+          const roomView = sanitizeViewForSession('S40_Rooms', sessionKind, role);
+          savePersistedView(roomView);
+          setActiveView(roomView);
+          return;
+        }
+        if (!sessionKind) {
+          setActiveView('S00_LandingPage');
+        }
         return;
       }
 
@@ -153,27 +214,45 @@ const MainAppContent: React.FC = () => {
           (parsed.scope === 'staff' && sessionKind === 'staff') ||
           (parsed.scope === 'resident' && sessionKind === 'resident')
         ) {
-          setActiveView(
-            sanitizeViewForSession(parsed.view || lastAuthView, sessionKind, role)
-          );
-          return;
+          const nextView = sanitizeViewForSession(parsed.view || lastAuthView, sessionKind, role);
+          savePersistedView(nextView);
+          setActiveView(nextView);
         }
         return;
       }
 
       if (parsed.scope === 'staff' || parsed.scope === 'staff_login') {
+        savePersistedView('S01_StaffLogin');
         setActiveView('S01_StaffLogin');
       } else if (parsed.scope === 'login' || parsed.scope === 'owner' || parsed.scope === 'resident') {
+        savePersistedView('S01_Login');
         setActiveView('S01_Login');
       }
     };
 
     window.addEventListener('hashchange', onHashChange);
     return () => window.removeEventListener('hashchange', onHashChange);
-  }, [sessionKind, role, lastAuthView]);
+  }, [sessionKind, role, lastAuthView, activeView]);
 
   const handleNavigate = (view: string) => {
-    setActiveView(view);
+    const nextView =
+      sessionKind && !PUBLIC_VIEWS.has(view)
+        ? sanitizeViewForSession(view, sessionKind, role)
+        : view;
+
+    savePersistedView(nextView);
+    if (sessionKind && !PUBLIC_VIEWS.has(nextView)) {
+      setLastAuthView(nextView);
+      savePersistedSession({
+        sessionKind,
+        role,
+        activeView: nextView,
+        studentId: sessionKind === 'resident' ? activeStudentId : undefined,
+        staffUser: sessionKind === 'staff' ? activeStaffUser : null,
+      });
+    }
+    syncUrlHash(nextView, sessionKind, role);
+    setActiveView(nextView);
     setIsMobileMenuOpen(false);
   };
 
@@ -182,15 +261,30 @@ const MainAppContent: React.FC = () => {
       meta?.sessionKind ?? (selRole === 'student' ? 'resident' : 'owner');
     const resolvedRole: Role =
       resolvedKind === 'resident' ? 'student' : selRole;
+    const resolvedStudentId =
+      resolvedKind === 'resident' ? meta?.studentId || activeStudentId : undefined;
+    const resolvedStaffUser =
+      resolvedKind === 'staff' ? meta?.staffUser || activeStaffUser : null;
     const targetView = getDefaultViewForRole(resolvedRole);
+
+    if (resolvedKind === 'resident' && resolvedStudentId) {
+      setActiveStudentId(resolvedStudentId);
+    }
+    if (resolvedKind === 'staff' && resolvedStaffUser) {
+      setActiveStaffUser(resolvedStaffUser);
+    } else if (resolvedKind !== 'staff') {
+      setActiveStaffUser(null);
+    }
 
     savePersistedSession({
       sessionKind: resolvedKind,
       role: resolvedRole,
       activeView: targetView,
-      studentId: resolvedKind === 'resident' ? meta?.studentId || activeStudentId : undefined,
-      staffUser: resolvedKind === 'staff' ? meta?.staffUser || activeStaffUser : null,
+      studentId: resolvedStudentId,
+      staffUser: resolvedStaffUser,
     });
+    savePersistedView(targetView);
+    syncUrlHash(targetView, resolvedKind, resolvedRole);
 
     needsStaffReconcileRef.current = false;
     setSessionKind(resolvedKind);
@@ -230,10 +324,10 @@ const MainAppContent: React.FC = () => {
 
   const handleOpenCabinetOrLogin = () => {
     if (sessionKind) {
-      setActiveView(sanitizeViewForSession(lastAuthView, sessionKind, role));
+      handleNavigate(sanitizeViewForSession(lastAuthView, sessionKind, role));
       return;
     }
-    setActiveView('S01_Login');
+    handleNavigate('S01_Login');
   };
 
   // Unauthenticated / public screen states
@@ -242,7 +336,7 @@ const MainAppContent: React.FC = () => {
       <S00_LandingPage
         onApplyNow={(roomType) => {
           setApplicationPrefillRoomType(roomType);
-          setActiveView('S03_OnlineApplication');
+          handleNavigate('S03_OnlineApplication');
         }}
         onLoginClick={handleOpenCabinetOrLogin}
         onGoToLogin={handleOpenCabinetOrLogin}
@@ -257,10 +351,10 @@ const MainAppContent: React.FC = () => {
         onLoginSuccess={handleLoginSuccess}
         onGoToPublicApp={() => {
           setApplicationPrefillRoomType(undefined);
-          setActiveView('S03_OnlineApplication');
+          handleNavigate('S03_OnlineApplication');
         }}
         onGoToLanding={() => {
-          setActiveView('S00_LandingPage');
+          handleNavigate('S00_LandingPage');
         }}
       />
     );
@@ -273,10 +367,10 @@ const MainAppContent: React.FC = () => {
         onLoginSuccess={handleLoginSuccess}
         onGoToPublicApp={() => {
           setApplicationPrefillRoomType(undefined);
-          setActiveView('S03_OnlineApplication');
+          handleNavigate('S03_OnlineApplication');
         }}
         onGoToLanding={() => {
-          setActiveView('S00_LandingPage');
+          handleNavigate('S00_LandingPage');
         }}
       />
     );
@@ -287,14 +381,14 @@ const MainAppContent: React.FC = () => {
       <S03_OnlineApplication
         initialRoomType={applicationPrefillRoomType}
         onSubmitted={() =>
-          setActiveView(
+          handleNavigate(
             sessionKind
               ? sanitizeViewForSession(lastAuthView, sessionKind, role)
               : 'S00_LandingPage'
           )
         }
         onBackToLogin={() =>
-          setActiveView(
+          handleNavigate(
             sessionKind
               ? sanitizeViewForSession(lastAuthView, sessionKind, role)
               : 'S00_LandingPage'

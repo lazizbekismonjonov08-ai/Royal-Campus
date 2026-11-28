@@ -1,6 +1,7 @@
 import React, { useState, useMemo } from 'react';
 import { useDorm } from '../context/DormContext';
 import { useI18n } from '../i18n/I18nContext';
+import { loadPersistedTab, savePersistedTab } from '../utils/sessionStorage';
 import {
   ShieldCheck,
   Radio,
@@ -55,7 +56,17 @@ export const S150_AccessControl: React.FC = () => {
 
   // Active Tab
   type TabKey = 'simulator' | 'terminals' | 'policies' | 'credentials' | 'guide';
-  const [activeTab, setActiveTab] = useState<TabKey>('simulator');
+  const [activeTab, setActiveTabState] = useState<TabKey>(() =>
+    loadPersistedTab(
+      'S150_AccessControl',
+      ['simulator', 'terminals', 'policies', 'credentials', 'guide'] as const,
+      'simulator'
+    )
+  );
+  const setActiveTab = (tab: TabKey) => {
+    setActiveTabState(tab);
+    savePersistedTab('S150_AccessControl', tab);
+  };
 
   // Simulator Form State
   const [simTerminalId, setSimTerminalId] = useState<string>(accessTerminals[0]?.id || 'term-main-entry');

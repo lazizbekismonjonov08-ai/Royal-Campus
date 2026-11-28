@@ -21,6 +21,7 @@ import {
   PaymentStatementSubject,
 } from '../components/PaymentStatementModal';
 import { PaymentExpiryBadge } from '../components/PaymentExpiryBadge';
+import { loadPersistedTab, savePersistedTab } from '../utils/sessionStorage';
 import {
   Plus,
   Search,
@@ -64,7 +65,13 @@ export const S50_PaymentsList: React.FC<PaymentsListProps> = ({ onOpenAddPayment
   } = useDorm();
   const { t, language, formatCurrency } = useI18n();
 
-  const [activeTab, setActiveTab] = useState<'residents' | 'transactions'>('residents');
+  const [activeTab, setActiveTabState] = useState<'residents' | 'transactions'>(() =>
+    loadPersistedTab('S50_Payments', ['residents', 'transactions'] as const, 'residents')
+  );
+  const setActiveTab = (tab: 'residents' | 'transactions') => {
+    setActiveTabState(tab);
+    savePersistedTab('S50_Payments', tab);
+  };
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState<'all' | 'pending_balance' | 'up_to_date'>('all');
   const [editingEntityId, setEditingEntityId] = useState<string | null>(null);
